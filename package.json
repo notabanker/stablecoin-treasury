@@ -1,0 +1,22 @@
+{
+  "name": "corporate-stablecoin-treasury-platform",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "start:gateway": "node services/api-gateway/src/index.mjs",
+    "start:wallet": "node services/wallet-service/src/index.mjs",
+    "start:policy": "node services/policy-service/src/index.mjs",
+    "start:compliance": "node services/compliance-service/src/index.mjs",
+    "start:payment": "node services/payment-service/src/index.mjs",
+    "start:accounting": "node services/accounting-service/src/index.mjs",
+    "start:reconciliation": "node services/reconciliation-service/src/index.mjs",
+    "start:operations": "node services/operations-service/src/index.mjs",
+    "check": "node --check apps/web/main.js && node --check scripts/dev.mjs && node --check scripts/smoke.mjs && node --check packages/shared/http.mjs && node --check packages/shared/data.mjs && node --check packages/shared/service-client.mjs && node --check packages/shared/store.mjs && node --check services/api-gateway/src/index.mjs && node --check services/wallet-service/src/index.mjs && node --check services/policy-service/src/index.mjs && node --check services/compliance-service/src/index.mjs && node --check services/payment-service/src/index.mjs && node --check services/accounting-service/src/index.mjs && node --check services/reconciliation-service/src/index.mjs && node --check services/operations-service/src/index.mjs",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

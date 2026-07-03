@@ -1,0 +1,156 @@
+x-service-common: &service-common
+  build: .
+  restart: unless-stopped
+  volumes:
+    - service-data:/data
+
+services:
+  wallet-service:
+    <<: *service-common
+    command: node services/wallet-service/src/index.mjs
+    environment:
+      DATA_DIR: /data
+      HOST: 0.0.0.0
+      PORT: 4101
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4101/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  policy-service:
+    <<: *service-common
+    command: node services/policy-service/src/index.mjs
+    environment:
+      DATA_DIR: /data
+      HOST: 0.0.0.0
+      PORT: 4102
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4102/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  compliance-service:
+    <<: *service-common
+    command: node services/compliance-service/src/index.mjs
+    environment:
+      DATA_DIR: /data
+      HOST: 0.0.0.0
+      PORT: 4103
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4103/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  payment-service:
+    <<: *service-common
+    command: node services/payment-service/src/index.mjs
+    depends_on:
+      wallet-service:
+        condition: service_healthy
+      policy-service:
+        condition: service_healthy
+      compliance-service:
+        condition: service_healthy
+      accounting-service:
+        condition: service_healthy
+      reconciliation-service:
+        condition: service_healthy
+      operations-service:
+        condition: service_healthy
+    environment:
+      ACCOUNTING_SERVICE_URL: http://accounting-service:4105
+      COMPLIANCE_SERVICE_URL: http://compliance-service:4103
+      DATA_DIR: /data
+      HOST: 0.0.0.0
+      OPERATIONS_SERVICE_URL: http://operations-service:4107
+      POLICY_SERVICE_URL: http://policy-service:4102
+      PORT: 4104
+      RECONCILIATION_SERVICE_URL: http://reconciliation-service:4106
+      WALLET_SERVICE_URL: http://wallet-service:4101
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4104/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  accounting-service:
+    <<: *service-common
+    command: node services/accounting-service/src/index.mjs
+    environment:
+      DATA_DIR: /data
+      HOST: 0.0.0.0
+      PORT: 4105
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4105/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  reconciliation-service:
+    <<: *service-common
+    command: node services/reconciliation-service/src/index.mjs
+    environment:
+      DATA_DIR: /data
+      HOST: 0.0.0.0
+      PORT: 4106
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4106/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  operations-service:
+    <<: *service-common
+    command: node services/operations-service/src/index.mjs
+    environment:
+      DATA_DIR: /data
+      HOST: 0.0.0.0
+      PORT: 4107
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4107/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  api-gateway:
+    <<: *service-common
+    command: node services/api-gateway/src/index.mjs
+    depends_on:
+      wallet-service:
+        condition: service_healthy
+      policy-service:
+        condition: service_healthy
+      compliance-service:
+        condition: service_healthy
+      payment-service:
+        condition: service_healthy
+      accounting-service:
+        condition: service_healthy
+      reconciliation-service:
+        condition: service_healthy
+      operations-service:
+        condition: service_healthy
+    environment:
+      ACCOUNTING_SERVICE_URL: http://accounting-service:4105
+      COMPLIANCE_SERVICE_URL: http://compliance-service:4103
+      DATA_DIR: /data
+      GATEWAY_PORT: 8080
+      HOST: 0.0.0.0
+      OPERATIONS_SERVICE_URL: http://operations-service:4107
+      PAYMENT_SERVICE_URL: http://payment-service:4104
+      POLICY_SERVICE_URL: http://policy-service:4102
+      RECONCILIATION_SERVICE_URL: http://reconciliation-service:4106
+      WALLET_SERVICE_URL: http://wallet-service:4101
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:8080/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    ports:
+      - "8080:8080"
+
+volumes:
+  service-data:
