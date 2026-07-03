@@ -469,6 +469,18 @@ tbody tr[data-action]:hover {
   font-size: 0.84rem;
 }
 
+.stale-banner {
+  align-items: center;
+  background: var(--amber-bg);
+  border-bottom: 1px solid var(--line);
+  color: var(--amber);
+  display: flex;
+  font-size: 0.88rem;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 10px 24px;
+}
+
 .filter-form {
   align-items: center;
   display: flex;

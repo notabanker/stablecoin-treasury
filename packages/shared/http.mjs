@@ -1,5 +1,5 @@
 import { createReadStream, existsSync, statSync } from "node:fs";
-import { extname, join, normalize } from "node:path";
+import { extname, join, normalize, sep } from "node:path";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 
@@ -23,6 +23,7 @@ export function createJsonService({ name, port, routes, staticRoot }) {
     if (req.method === "OPTIONS") {
       res.writeHead(204);
       res.end();
+      metrics.record(204, Date.now() - started);
       return;
     }
 
@@ -34,6 +35,8 @@ export function createJsonService({ name, port, routes, staticRoot }) {
       }
       if (draining && url.pathname !== "/health") {
         sendJson(res, 503, { error: "service_draining", service: name });
+        metrics.record(503, Date.now() - started);
+        logRequest(name, req.method, url.pathname, 503, Date.now() - started, requestId);
         return;
       }
 
@@ -58,7 +61,7 @@ export function createJsonService({ name, port, routes, staticRoot }) {
       }
 
       if (staticRoot && req.method === "GET") {
-        const served = serveStatic(staticRoot, url.pathname, res);
+        const served = await serveStatic(staticRoot, url.pathname, res);
         if (served) {
           metrics.record(200, Date.now() - started);
           logRequest(name, req.method, url.pathname, 200, Date.now() - started, requestId);
@@ -71,17 +74,21 @@ export function createJsonService({ name, port, routes, staticRoot }) {
       logRequest(name, req.method, url.pathname, 404, Date.now() - started, requestId);
     } catch (error) {
       const status = error.status || 500;
-      sendJson(res, status, {
-        error: error.code || "internal_error",
-        message: error.message,
-        service: name
-      });
+      if (!res.headersSent) {
+        sendJson(res, status, {
+          error: error.code || "internal_error",
+          message: error.message,
+          service: name
+        });
+      }
       metrics.record(status, Date.now() - started);
       logRequest(name, req.method, req.url, status, Date.now() - started, requestId);
     }
   });
+  // headersTimeout must stay below requestTimeout: headers are a prefix of the whole request,
+  // so they must always arrive first and faster.
+  server.headersTimeout = Number(process.env.HTTP_HEADERS_TIMEOUT_MS || 8000);
   server.requestTimeout = Number(process.env.HTTP_REQUEST_TIMEOUT_MS || 30000);
-  server.headersTimeout = Number(process.env.HTTP_HEADERS_TIMEOUT_MS || 31000);
 
   server.listen(port, host, () => {
     console.log(`${name} listening on http://${host}:${port}`);
@@ -110,32 +117,11 @@ export function ok(body) {
   return { status: 200, body };
 }
 
-export function created(body) {
-  return { status: 201, body };
-}
-
-export function noContent() {
-  return { status: 204, body: null };
-}
-
 export function httpError(status, message, code) {
   const error = new Error(message);
   error.status = status;
   error.code = code;
   return error;
-}
-
-export function resettable(seedFactory) {
-  let state = seedFactory();
-  return {
-    get state() {
-      return state;
-    },
-    reset() {
-      state = seedFactory();
-      return state;
-    }
-  };
 }
 
 async function readJson(req) {
@@ -197,19 +183,37 @@ function matchPath(pattern, pathname) {
 }
 
 function serveStatic(root, pathname, res) {
-  const requested = pathname === "/" ? "/index.html" : pathname;
-  const relative = normalize(requested).replace(/^(\.\.(\/|\\|$))+/, "");
-  const filePath = join(root, relative);
-  if (!filePath.startsWith(root) || !existsSync(filePath) || !statSync(filePath).isFile()) {
-    return false;
-  }
+  return new Promise((resolve) => {
+    const requested = pathname === "/" ? "/index.html" : pathname;
+    const relative = normalize(requested).replace(/^(\.\.(\/|\\|$))+/, "");
+    const filePath = join(root, relative);
+    const rootWithSep = root.endsWith(sep) ? root : root + sep;
+    if (!filePath.startsWith(rootWithSep) || !existsSync(filePath) || !statSync(filePath).isFile()) {
+      resolve(false);
+      return;
+    }
 
-  const ext = extname(filePath);
-  res.writeHead(200, {
-    "Content-Type": contentTypes[ext] || "application/octet-stream"
+    const ext = extname(filePath);
+    const stream = createReadStream(filePath);
+    stream.on("error", () => {
+      // The file existed at statSync-time but failed to read (deleted mid-request, permission
+      // change, disk error). Without this handler the unhandled 'error' event on the stream
+      // would crash the whole process -- this is the gateway, so that would take the front
+      // door down for every service behind it.
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "static_file_read_failed" }));
+      } else {
+        res.destroy();
+      }
+      resolve(true);
+    });
+    res.writeHead(200, {
+      "Content-Type": contentTypes[ext] || "application/octet-stream"
+    });
+    stream.pipe(res);
+    stream.on("end", () => resolve(true));
   });
-  createReadStream(filePath).pipe(res);
-  return true;
 }
 
 function sendJson(res, status, body) {
@@ -223,7 +227,14 @@ function sendJson(res, status, body) {
 }
 
 function setBaseHeaders(res, requestId) {
-  res.setHeader("Access-Control-Allow-Origin", process.env.CORS_ORIGIN || "*");
+  // No Access-Control-Allow-Origin by default: same-origin requests (the browser app is served
+  // by this same gateway) never need it, and omitting it means cross-origin browser requests
+  // are blocked by same-origin policy unless an operator explicitly opts in via CORS_ORIGIN.
+  const corsOrigin = process.env.CORS_ORIGIN;
+  if (corsOrigin) {
+    res.setHeader("Access-Control-Allow-Origin", corsOrigin);
+    res.setHeader("Vary", "Origin");
+  }
   res.setHeader("Access-Control-Allow-Headers", "content-type, idempotency-key, x-request-id");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, OPTIONS");
   res.setHeader("Referrer-Policy", "no-referrer");

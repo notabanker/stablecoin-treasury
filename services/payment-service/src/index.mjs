@@ -1,21 +1,24 @@
-import {
-  createId,
-  createSeedData,
-  estimateFee,
-  nextPaymentReference,
-  randomHex,
-  ratesToEur
-} from "../../../packages/shared/data.mjs";
+import { createId, createSeedData, estimateFee, randomHex } from "../../../packages/shared/data.mjs";
 import { createJsonService, httpError, ok, route } from "../../../packages/shared/http.mjs";
 import { serviceGet, servicePost } from "../../../packages/shared/service-client.mjs";
 import { createDurableStore } from "../../../packages/shared/store.mjs";
+import { requiredApprovalsFor } from "./approvals.mjs";
+import { allocateReference, completeIdempotencyKey, hashRequest, releaseIdempotencyKey, reserveIdempotencyKey } from "./idempotency.mjs";
+import { withLock } from "./lock.mjs";
 
 const port = Number(process.env.PORT || 4104);
-const store = createDurableStore("payment-service", () => ({
-  idempotency: {},
-  payments: createSeedData().payments
-}));
+const store = createDurableStore("payment-service", () => {
+  const payments = createSeedData().payments;
+  return {
+    idempotency: {},
+    payments,
+    referenceCounter: highestReferenceIn(payments)
+  };
+});
 store.state.idempotency ||= {};
+if (!Number.isFinite(store.state.referenceCounter)) {
+  store.state.referenceCounter = highestReferenceIn(store.state.payments);
+}
 store.save();
 
 createJsonService({
@@ -28,75 +31,111 @@ createJsonService({
     route("GET", "/payments", () => ok(store.state.payments)),
     route("GET", "/payments/:id", ({ params }) => ok(findPayment(params.id))),
     route("POST", "/payments", async ({ body, headers }) => ok({ payment: await createPayment(body, headers["idempotency-key"]) })),
-    route("POST", "/payments/:id/approve", async ({ params }) => ok({ payment: await approvePayment(params.id) })),
-    route("POST", "/payments/:id/execute", async ({ params }) => ok({ payment: await executePayment(params.id) })),
-    route("POST", "/payments/:id/cancel", async ({ params }) => ok({ payment: await cancelPayment(params.id) }))
+    // approve/execute/cancel all read-then-write a payment's status and approvals count across
+    // await boundaries (policy evaluation, downstream calls). withLock serializes calls per
+    // payment id so concurrent requests against the same payment can't interleave their
+    // check-then-write sections -- see lock.mjs.
+    route("POST", "/payments/:id/approve", async ({ params }) => ok({ payment: await withLock(params.id, () => approvePayment(params.id)) })),
+    route("POST", "/payments/:id/execute", async ({ params }) => ok({ payment: await withLock(params.id, () => executePayment(params.id)) })),
+    route("POST", "/payments/:id/cancel", async ({ params }) => ok({ payment: await withLock(params.id, () => cancelPayment(params.id)) }))
   ]
 });
 
 async function createPayment(input, idempotencyKey) {
-  if (idempotencyKey && store.state.idempotency[idempotencyKey]) {
-    return findPayment(store.state.idempotency[idempotencyKey]);
-  }
-
-  const wallet = await serviceGet("wallet", `/wallets/${input.sourceWalletId}`);
-  const counterparty = await serviceGet("compliance", `/counterparties/${input.counterpartyId}`);
-  const policy = await serviceGet("policy", "/policies");
-  const amount = Number(input.amount || 0);
-  if (!Number.isFinite(amount) || amount <= 0) {
-    throw httpError(422, "Payment amount must be positive", "invalid_amount");
-  }
-
-  const payment = {
-    id: createId("pay"),
-    reference: nextPaymentReference(store.state.payments),
-    type: input.type || "Supplier",
-    sourceWalletId: wallet.id,
-    counterpartyId: counterparty.id,
-    asset: wallet.asset,
-    amount,
-    fee: estimateFee(amount, wallet.asset),
-    status: "Pending approval",
-    approvals: 0,
-    requiredApprovals: requiredApprovalsFor(amount, wallet.asset, policy),
-    screenResult: counterparty.status === "Approved" ? "Clear" : counterparty.status,
-    createdAt: new Date().toISOString(),
-    settledAt: "",
-    providerRef: "",
-    chainRef: "",
-    memo: String(input.memo || "").trim()
-  };
-
-  const evaluation = await evaluatePayment(payment);
-  if (evaluation.decision.status === "Blocked") {
-    payment.status = "Blocked";
-  } else if (evaluation.decision.status === "Clear" && payment.requiredApprovals === 0) {
-    payment.status = "Approved";
-  }
-
-  store.state.payments.unshift(payment);
+  // Everything up to and including allocateReference() below is synchronous -- no `await` --
+  // so two concurrent requests can never interleave inside this block. That is what makes the
+  // idempotency reservation and reference allocation race-free without a database transaction.
+  let requestHash = null;
   if (idempotencyKey) {
-    store.state.idempotency[idempotencyKey] = payment.id;
+    requestHash = hashRequest(input);
+    const reservation = reserveIdempotencyKey(store, idempotencyKey, requestHash);
+    if (reservation.outcome === "hash_mismatch") {
+      throw httpError(422, "Idempotency-Key was already used with a different request body", "idempotency_key_reuse");
+    }
+    if (reservation.outcome === "in_progress") {
+      throw httpError(409, "A request with this Idempotency-Key is already being processed", "idempotency_in_progress");
+    }
+    if (reservation.outcome === "done") {
+      return findPayment(reservation.paymentId);
+    }
+    // outcome === "reserved": this call owns the key and must complete or release it.
   }
-  store.save();
+  const reference = allocateReference(store);
 
-  if (evaluation.decision.status === "Blocked") {
-    await bestEffortPost("reconciliation", "/reconciliation/exceptions", {
-      payment,
-      issue: evaluation.decision.detail,
-      source: "Policy engine"
-    });
-    await bestEffortPost("operations", "/alerts", {
-      severity: "High",
-      title: `${payment.reference} blocked`,
-      detail: evaluation.decision.detail
-    });
-    await audit("Policy engine", "Payment blocked", payment.reference, evaluation.decision.detail);
-  } else {
-    await audit("Marta Klein", "Payment created", payment.reference, `${payment.asset} ${payment.amount} to ${counterparty.name}`);
+  try {
+    const wallet = await serviceGet("wallet", `/wallets/${input.sourceWalletId}`);
+    const counterparty = await serviceGet("compliance", `/counterparties/${input.counterpartyId}`);
+    const policy = await serviceGet("policy", "/policies");
+    const amount = Number(input.amount || 0);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw httpError(422, "Payment amount must be positive", "invalid_amount");
+    }
+
+    const payment = {
+      id: createId("pay"),
+      reference,
+      type: input.type || "Supplier",
+      sourceWalletId: wallet.id,
+      counterpartyId: counterparty.id,
+      asset: wallet.asset,
+      amount,
+      fee: estimateFee(amount, wallet.asset),
+      status: "Pending approval",
+      approvals: 0,
+      requiredApprovals: requiredApprovalsFor(amount, wallet.asset, policy),
+      screenResult: counterparty.status === "Approved" ? "Clear" : counterparty.status,
+      createdAt: new Date().toISOString(),
+      settledAt: "",
+      providerRef: "",
+      chainRef: "",
+      memo: String(input.memo || "").trim()
+    };
+
+    const evaluation = await evaluatePayment(payment);
+    let autoApproved = false;
+    if (evaluation.decision.status === "Blocked") {
+      payment.status = "Blocked";
+    } else if (evaluation.decision.status === "Clear" && payment.requiredApprovals === 0) {
+      payment.status = "Approved";
+      autoApproved = true;
+    }
+
+    store.state.payments.unshift(payment);
+    store.save();
+    if (idempotencyKey) {
+      completeIdempotencyKey(store, idempotencyKey, payment.id);
+    }
+
+    if (evaluation.decision.status === "Blocked") {
+      await bestEffortPost("reconciliation", "/reconciliation/exceptions", {
+        payment,
+        issue: evaluation.decision.detail,
+        source: "Policy engine"
+      });
+      await bestEffortPost("operations", "/alerts", {
+        severity: "High",
+        title: `${payment.reference} blocked`,
+        detail: evaluation.decision.detail
+      });
+      await audit("Policy engine", "Payment blocked", payment.reference, evaluation.decision.detail);
+    } else if (autoApproved) {
+      await audit(
+        "Policy engine",
+        "Payment auto-approved",
+        payment.reference,
+        `${payment.asset} ${payment.amount} to ${counterparty.name} auto-approved (below approval threshold)`
+      );
+    } else {
+      await audit("Marta Klein", "Payment created", payment.reference, `${payment.asset} ${payment.amount} to ${counterparty.name}`);
+    }
+
+    return payment;
+  } catch (error) {
+    if (idempotencyKey) {
+      releaseIdempotencyKey(store, idempotencyKey);
+    }
+    throw error;
   }
-
-  return payment;
 }
 
 async function approvePayment(id) {
@@ -214,17 +253,6 @@ async function audit(actor, action, object, detail) {
   return bestEffortPost("operations", "/audit", { actor, action, object, detail });
 }
 
-function requiredApprovalsFor(amount, asset, policy) {
-  const amountEur = amount * (ratesToEur[asset] || 1);
-  if (amountEur >= policy.secondApprovalThreshold) {
-    return 2;
-  }
-  if (amountEur >= policy.approvalThreshold) {
-    return 1;
-  }
-  return 0;
-}
-
 async function bestEffortPost(service, path, body) {
   try {
     return await servicePost(service, path, body);
@@ -246,4 +274,11 @@ function findPayment(id) {
     throw httpError(404, `payment ${id} not found`, "not_found");
   }
   return payment;
+}
+
+function highestReferenceIn(payments) {
+  return payments.reduce((highest, payment) => {
+    const value = Number(String(payment.reference).replace(/\D/g, ""));
+    return Number.isFinite(value) ? Math.max(highest, value) : highest;
+  }, 1000);
 }

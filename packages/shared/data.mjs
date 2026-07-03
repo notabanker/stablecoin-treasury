@@ -314,7 +314,8 @@ export function createSeedData() {
         asset: "EURC",
         status: "Resolved",
         owner: "Auto",
-        ageHours: 0.1
+        createdAt: new Date(Date.now() - 0.1 * 3_600_000).toISOString(),
+        resolvedAt: now
       },
       {
         id: "rec-2",
@@ -325,7 +326,7 @@ export function createSeedData() {
         asset: "USDC",
         status: "Open",
         owner: "Compliance Ops",
-        ageHours: 4.5
+        createdAt: new Date(Date.now() - 4.5 * 3_600_000).toISOString()
       }
     ],
     journalEntries: [

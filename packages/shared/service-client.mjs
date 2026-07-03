@@ -11,6 +11,10 @@ export const serviceUrls = {
 const defaultTimeoutMs = Number(process.env.SERVICE_TIMEOUT_MS || 2500);
 const defaultRetries = Number(process.env.SERVICE_RETRIES || 2);
 
+// Options that configure this client's own behavior, not fetch() -- must never be spread into
+// the fetch init object.
+const CLIENT_ONLY_OPTION_KEYS = ["retryable", "idempotencyKey", "timeoutMs", "requestId"];
+
 export async function serviceGet(service, path) {
   return serviceRequest(service, path, { method: "GET", retryable: true });
 }
@@ -30,14 +34,19 @@ export async function serviceRequest(service, path, options) {
     throw new Error(`Unknown service ${service}`);
   }
   const attempts = options.retryable ? defaultRetries + 1 : 1;
+  const fetchInit = fetchInitFrom(options);
   let lastError;
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), options.timeoutMs || defaultTimeoutMs);
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, options.timeoutMs || defaultTimeoutMs);
     try {
       const response = await fetch(`${baseUrl}${path}`, {
-        ...options,
+        ...fetchInit,
         signal: controller.signal,
         headers: {
           "X-Request-Id": options.requestId || Math.random().toString(36).slice(2, 12),
@@ -45,13 +54,41 @@ export async function serviceRequest(service, path, options) {
           ...(options.headers || {})
         }
       });
-      clearTimeout(timeout);
+      // The timeout must stay armed through the body read: clearing it right after headers
+      // arrive leaves a stalled response body able to hang the caller indefinitely.
       const text = await response.text();
-      const data = text ? JSON.parse(text) : null;
+      clearTimeout(timeout);
+      const data = parseJsonOrNull(text);
+      if (data === PARSE_FAILED) {
+        if (response.ok) {
+          const error = new Error(`${service} returned a non-JSON response body`);
+          error.status = 502;
+          error.code = "invalid_upstream_response";
+          error.body = { error: "invalid_upstream_response", service };
+          if (attempt < attempts && options.retryable) {
+            await backoff(attempt);
+            continue;
+          }
+          throw error;
+        }
+        const error = new Error(`${service} request failed with status ${response.status}`);
+        error.status = response.status;
+        error.body = null;
+        if (shouldRetry(error.status) && attempt < attempts) {
+          await backoff(attempt);
+          continue;
+        }
+        throw error;
+      }
       if (!response.ok) {
         const error = new Error(data?.message || `${service} request failed`);
         error.status = response.status;
         error.body = data;
+        // http.mjs's error handler serializes the original httpError() code into body.error --
+        // without copying it here, every error that passes through a service-to-service call
+        // (e.g. the gateway forwarding a payment-service rejection) loses its specific code and
+        // falls back to a generic "internal_error" at the next hop's error handler.
+        error.code = data?.error;
         if (shouldRetry(error.status) && attempt < attempts) {
           await backoff(attempt);
           continue;
@@ -61,14 +98,34 @@ export async function serviceRequest(service, path, options) {
       return data;
     } catch (error) {
       clearTimeout(timeout);
+      if (timedOut) error.name = "AbortError";
       lastError = normalizeError(service, error);
-      if (!options.retryable || attempt >= attempts || !isRetryableError(error)) {
+      if (!options.retryable || attempt >= attempts || !isRetryableError(lastError)) {
         throw lastError;
       }
       await backoff(attempt);
     }
   }
   throw lastError;
+}
+
+const PARSE_FAILED = Symbol("parse_failed");
+
+function parseJsonOrNull(text) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return PARSE_FAILED;
+  }
+}
+
+function fetchInitFrom(options) {
+  const init = { ...options };
+  for (const key of CLIENT_ONLY_OPTION_KEYS) {
+    delete init[key];
+  }
+  return init;
 }
 
 function shouldRetry(status) {

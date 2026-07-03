@@ -13,8 +13,12 @@
     "start:accounting": "node services/accounting-service/src/index.mjs",
     "start:reconciliation": "node services/reconciliation-service/src/index.mjs",
     "start:operations": "node services/operations-service/src/index.mjs",
-    "check": "node --check apps/web/main.js && node --check scripts/dev.mjs && node --check scripts/smoke.mjs && node --check packages/shared/http.mjs && node --check packages/shared/data.mjs && node --check packages/shared/service-client.mjs && node --check packages/shared/store.mjs && node --check services/api-gateway/src/index.mjs && node --check services/wallet-service/src/index.mjs && node --check services/policy-service/src/index.mjs && node --check services/compliance-service/src/index.mjs && node --check services/payment-service/src/index.mjs && node --check services/accounting-service/src/index.mjs && node --check services/reconciliation-service/src/index.mjs && node --check services/operations-service/src/index.mjs",
-    "smoke": "node scripts/smoke.mjs"
+    "check": "node --check apps/web/main.js && node --check scripts/dev.mjs && node --check scripts/smoke.mjs && node --check packages/shared/http.mjs && node --check packages/shared/data.mjs && node --check packages/shared/service-client.mjs && node --check packages/shared/store.mjs && node --check services/api-gateway/src/index.mjs && node --check services/wallet-service/src/index.mjs && node --check services/policy-service/src/index.mjs && node --check services/policy-service/src/evaluate.mjs && node --check services/compliance-service/src/index.mjs && node --check services/payment-service/src/index.mjs && node --check services/payment-service/src/approvals.mjs && node --check services/payment-service/src/idempotency.mjs && node --check services/accounting-service/src/index.mjs && node --check services/accounting-service/src/journals.mjs && node --check services/reconciliation-service/src/index.mjs && node --check services/operations-service/src/index.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "test": "node --test tests/unit/*.test.mjs",
+    "test:integration": "node --test tests/integration/*.test.mjs",
+    "test:concurrency": "node --test tests/concurrency/*.test.mjs",
+    "test:all": "npm run test && npm run test:integration && npm run test:concurrency"
   },
   "engines": {
     "node": ">=20"

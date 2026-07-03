@@ -10,6 +10,7 @@ const state = {
     paymentSearch: "",
     paymentStatus: "All"
   },
+  refreshFailedAt: null,
   selectedPaymentId: "",
   showPaymentForm: false,
   toast: null
@@ -24,12 +25,7 @@ const views = [
   ["operations", "Operations"]
 ];
 
-const eurRates = {
-  EURC: 1,
-  EURI: 1,
-  USDC: 0.92,
-  USDG: 0.92
-};
+const FETCH_TIMEOUT_MS = 10000;
 
 const statusClasses = {
   Approved: "status-approved",
@@ -100,6 +96,7 @@ function bindEvents() {
       "approve-payment": () => post(`/payments/${id}/approve`, {}, "Payment approved"),
       "cancel-payment": () => post(`/payments/${id}/cancel`, {}, "Payment cancelled"),
       "execute-payment": () => post(`/payments/${id}/execute`, {}, "Payment executed"),
+      "retry-execution": () => post(`/payments/${id}/execute`, {}, "Execution retried"),
       "resolve-recon": () => post(`/reconciliation/${id}/resolve`, {}, "Exception resolved"),
       "simulate-recon": () => post("/reconciliation/exceptions/simulate", {}, "Exception created"),
       "export-accounting": () => post("/accounting/export", {}, "Journal batch exported"),
@@ -167,13 +164,24 @@ function bindEvents() {
 
 async function loadState(label = "Loading desk") {
   state.busy = label;
-  state.error = "";
+  if (!state.data) {
+    state.error = "";
+  }
   render();
   try {
     const data = await request("/state");
     receiveState(data);
   } catch (error) {
-    state.error = readableError(error);
+    if (state.data) {
+      // Data already on screen -- a failed refresh must not silently leave a stale-looking
+      // dashboard. Surface it as a banner (persists until the next successful refresh) and a
+      // toast (transient), rather than only setting state.error, which nothing rendered while
+      // state.data was truthy.
+      state.refreshFailedAt = new Date().toISOString();
+      showToast(`Refresh failed: ${readableError(error)}`, "error");
+    } else {
+      state.error = readableError(error);
+    }
   } finally {
     state.busy = "";
     render();
@@ -202,13 +210,26 @@ async function post(path, body, successMessage, headers = {}) {
 }
 
 async function request(path, options = {}) {
-  const response = await fetch(`/api${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers || {})
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch(`/api${path}`, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        ...(options.headers || {})
+      }
+    });
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error(`Request to ${path} timed out after ${FETCH_TIMEOUT_MS / 1000}s`);
     }
-  });
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
   const text = await response.text();
   const payload = text ? JSON.parse(text) : null;
   if (!response.ok) {
@@ -221,6 +242,7 @@ async function request(path, options = {}) {
 function receiveState(data) {
   state.data = data;
   state.error = "";
+  state.refreshFailedAt = null;
   state.selectedPaymentId = state.selectedPaymentId || data.selectedPaymentId || data.payments?.[0]?.id || "";
 }
 
@@ -326,6 +348,17 @@ function renderTopbar() {
         ${button("New payment", "new-payment", "", "primary")}
       </div>
     </header>
+    ${renderStaleBanner()}
+  `;
+}
+
+function renderStaleBanner() {
+  if (!state.refreshFailedAt) return "";
+  return `
+    <div class="stale-banner" role="alert">
+      <span>Showing data from ${escapeHtml(formatDateTime(state.data.lastUpdated))}. The last refresh failed at ${escapeHtml(formatDateTime(state.refreshFailedAt))}.</span>
+      ${button("Retry refresh", "refresh", "", "secondary")}
+    </div>
   `;
 }
 
@@ -533,6 +566,14 @@ function renderPaymentActions(payment, compact) {
   if (payment.status === "Approved") {
     parts.push(button(compact ? "Execute" : "Execute payment", "execute-payment", payment.id, "primary"));
     parts.push(button(compact ? "Cancel" : "Cancel payment", "cancel-payment", payment.id, "ghost"));
+  }
+  if (payment.status === "Executing") {
+    // Execution is resume-safe: re-calling execute on an Executing payment picks up where it
+    // left off (wallet debit is idempotent) instead of leaving the payment stuck with no action.
+    parts.push(button(compact ? "Retry" : "Retry execution", "retry-execution", payment.id, "primary"));
+  }
+  if (payment.status === "Failed" && !compact) {
+    parts.push(`<span class="muted">Debit did not complete. This requires operator repair -- not yet available in this build.</span>`);
   }
   return parts.join("");
 }
@@ -1111,7 +1152,8 @@ function renderToast() {
 }
 
 function walletValueEur(wallet) {
-  return Number(wallet.balance || 0) * (eurRates[wallet.asset] || 1);
+  const rates = state.data?.ratesToEur || {};
+  return Number(wallet.balance || 0) * (rates[wallet.asset] || 1);
 }
 
 function token(amount, asset) {

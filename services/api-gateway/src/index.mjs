@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ratesToEur } from "../../../packages/shared/data.mjs";
 import { createJsonService, ok, route } from "../../../packages/shared/http.mjs";
 import { serviceGet, servicePost, serviceUrls } from "../../../packages/shared/service-client.mjs";
 
@@ -28,9 +30,13 @@ createJsonService({
       ]);
       return ok({ state: await composeState() });
     }),
-    route("POST", "/api/payments", async ({ body, headers, requestId }) => {
+    route("POST", "/api/payments", async ({ body, headers }) => {
+      // Idempotency identity must never be derived from a client-controlled value (the
+      // x-request-id header is attacker/client-chosen). If the caller sends no key, a fresh
+      // server-generated UUID is used so retries are simply not deduplicated -- callers who
+      // want retry-safety must supply their own Idempotency-Key.
       const result = await servicePost("payment", "/payments", body, {
-        idempotencyKey: headers["idempotency-key"] || `gateway:${requestId}`
+        idempotencyKey: headers["idempotency-key"] || randomUUID()
       });
       return ok({ ...result, state: await composeState() });
     }),
@@ -153,6 +159,7 @@ async function composeState() {
     payments,
     policies,
     providers,
+    ratesToEur,
     reconciliation,
     selectedPaymentId: payments[0]?.id || "",
     wallets
