@@ -196,12 +196,25 @@ async function executePayment(id) {
     await transitionIfStatus(id, "Approved", { status: "Executing" });
   }
 
+  // Resolve whether the counterparty's wallet address matches a wallet this tenant already owns
+  // (an intra-group transfer) so wallet-service can credit that wallet's own ledger account
+  // instead of the external settlement_clearing account -- without this, intra-group payments
+  // debited the source wallet with nowhere for the money to land.
+  const destinationWallet = context.wallets.find(
+    (candidate) => candidate.id !== payment.sourceWalletId && candidate.address === context.counterparty.wallet && candidate.asset === payment.asset
+  );
+
   let debited;
   try {
     debited = await servicePost(
       "wallet",
       `/wallets/${payment.sourceWalletId}/debit`,
-      { amount: payment.amount + payment.fee },
+      {
+        principal: payment.amount,
+        fee: payment.fee,
+        destinationWalletId: destinationWallet?.id,
+        paymentId: payment.id
+      },
       { idempotencyKey: `debit:${payment.id}` }
     );
   } catch (error) {

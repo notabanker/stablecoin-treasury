@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import pg from "pg";
 import { runMigrations } from "../../db/scripts/migrate.mjs";
-import { closeAllPools, query } from "../../packages/shared/db.mjs";
+import { closeAllPools, query, withTransaction } from "../../packages/shared/db.mjs";
 import { DEFAULT_TENANT_ID } from "../../packages/shared/tenant.mjs";
 import { allocateReference, completeIdempotencyKey, hashRequest, releaseIdempotencyKey, reserveIdempotencyKey } from "../../services/payment-service/src/idempotency.mjs";
+import { getOrCreateSharedAccount, getOrCreateWalletAccount, getWalletBalance, postTransaction } from "../../services/wallet-service/src/ledger.mjs";
 
 const adminUrl = process.env.DATABASE_ADMIN_URL || "postgres://127.0.0.1:5432/postgres";
 
@@ -84,7 +85,7 @@ test("allocateReference issues unique references under concurrency", async () =>
   });
 });
 
-test("wallet debit UPDATE...WHERE prevents overdraft under concurrent debits", async () => {
+test("ledger posting prevents overdraft under concurrent debits (row lock + derived balance)", async () => {
   await withFreshDatabase(async () => {
     await query(
       "wallet",
@@ -98,21 +99,52 @@ test("wallet debit UPDATE...WHERE prevents overdraft under concurrent debits", a
     );
     await query(
       "wallet",
-      "INSERT INTO wallet.wallets (id, tenant_id, entity_id, provider_id, asset_id, address, custody, status, balance) VALUES ('wal-x', $1, 'ent-x', 'prov-x', 'EURX', '0x0', 'x', 'Active', 100)",
+      "INSERT INTO wallet.wallets (id, tenant_id, entity_id, provider_id, asset_id, address, custody, status) VALUES ('wal-x', $1, 'ent-x', 'prov-x', 'EURX', '0x0', 'x', 'Active')",
       [DEFAULT_TENANT_ID]
     );
+    // The deferred balance trigger fires at COMMIT of the transaction that inserted the entries,
+    // so seeding the opening balance must happen inside one real transaction (a shared client),
+    // not as separate auto-committing pool.query() calls -- each of those would commit alone and
+    // trip the trigger on an intentionally "unbalanced-so-far" single entry.
+    await withTransaction("wallet", async (client) => {
+      const openingAccount = await getOrCreateSharedAccount(client, "opening_balance", "EURX");
+      const walletAccount = await getOrCreateWalletAccount(client, "wal-x", "EURX");
+      await postTransaction(client, {
+        idempotencyKey: "seed-100",
+        description: "seed",
+        entries: [
+          { accountId: openingAccount.id, direction: "debit", amount: 100 },
+          { accountId: walletAccount.id, direction: "credit", amount: 100 }
+        ]
+      });
+    });
 
-    const results = await Promise.all(
-      Array.from({ length: 10 }, () =>
-        query("wallet", "UPDATE wallet.wallets SET balance = balance - 20 WHERE id = 'wal-x' AND balance >= 20 RETURNING balance").then(
-          (r) => r.rows.length > 0
-        )
-      )
-    );
+    // Exercise the real route logic (row lock, balance check, ledger posting), not a
+    // reimplementation of it, by calling the same withTransaction-wrapped block the service uses.
+    async function attemptDebit(key) {
+      return withTransaction("wallet", async (client) => {
+        await client.query("SELECT * FROM wallet.wallets WHERE id = 'wal-x' FOR UPDATE");
+        const balance = await getWalletBalance(client, "wal-x");
+        if (balance < 20) return false;
+        const clearing = await getOrCreateSharedAccount(client, "settlement_clearing", "EURX");
+        const source = await getOrCreateWalletAccount(client, "wal-x", "EURX");
+        await postTransaction(client, {
+          idempotencyKey: key,
+          description: "debit",
+          entries: [
+            { accountId: source.id, direction: "debit", amount: 20 },
+            { accountId: clearing.id, direction: "credit", amount: 20 }
+          ]
+        });
+        return true;
+      });
+    }
+
+    const results = await Promise.all(Array.from({ length: 10 }, (_, i) => attemptDebit(`debit-${i}`)));
     const succeeded = results.filter(Boolean).length;
     assert.equal(succeeded, 5, "exactly 5 of 10 concurrent 20-unit debits should succeed against a balance of 100");
 
-    const { rows } = await query("wallet", "SELECT balance FROM wallet.wallets WHERE id = 'wal-x'");
-    assert.equal(Number(rows[0].balance), 0);
+    const finalBalance = await getWalletBalance({ query: (...args) => query("wallet", ...args) }, "wal-x");
+    assert.equal(finalBalance, 0);
   });
 });

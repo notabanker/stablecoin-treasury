@@ -49,6 +49,35 @@ test("full payment lifecycle settles with balanced journals and a matched recon 
   assert.equal(roundTo2(walletBefore.balance - walletAfter.balance), roundTo2(create.data.payment.amount + create.data.payment.fee));
 });
 
+test("intra-group transfers credit the destination wallet instead of losing the principal", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.stop());
+
+  // cp-vega-pl's counterparty wallet address matches wal-pl-eur's address in seed data -- this is
+  // exactly the scenario that used to lose money: the source wallet was debited and there was no
+  // credit anywhere, so the principal vanished from the books entirely.
+  const before = await api(stack.baseUrl, "/state");
+  const sourceBefore = before.data.wallets.find((w) => w.id === "wal-hold-eur");
+  const destBefore = before.data.wallets.find((w) => w.id === "wal-pl-eur");
+
+  const create = await api(stack.baseUrl, "/payments", {
+    method: "POST",
+    headers: { "Idempotency-Key": "intra-group-1" },
+    body: JSON.stringify({ amount: 10000, counterpartyId: "cp-vega-pl", sourceWalletId: "wal-hold-eur", type: "Intra-group" })
+  });
+  await api(stack.baseUrl, `/payments/${create.data.payment.id}/approve`, { method: "POST" });
+  const executed = await api(stack.baseUrl, `/payments/${create.data.payment.id}/execute`, { method: "POST" });
+  assert.equal(executed.data.payment.status, "Settled");
+
+  const sourceAfter = executed.data.state.wallets.find((w) => w.id === "wal-hold-eur");
+  const destAfter = executed.data.state.wallets.find((w) => w.id === "wal-pl-eur");
+
+  const principal = executed.data.payment.amount;
+  const fee = executed.data.payment.fee;
+  assert.equal(roundTo2(sourceBefore.balance - sourceAfter.balance), roundTo2(principal + fee), "source wallet loses principal + fee");
+  assert.equal(roundTo2(destAfter.balance - destBefore.balance), roundTo2(principal), "destination wallet gains exactly the principal");
+});
+
 test("resuming execute from Executing does not double-debit the wallet", async (t) => {
   const stack = await startStack();
   t.after(() => stack.stop());
