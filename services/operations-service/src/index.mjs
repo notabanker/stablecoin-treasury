@@ -1,46 +1,57 @@
 import { createId } from "../../../packages/shared/data.mjs";
-import { query } from "../../../packages/shared/db.mjs";
+import { query, withTransaction } from "../../../packages/shared/db.mjs";
 import { createJsonService, httpError, ok, route } from "../../../packages/shared/http.mjs";
-import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
+import { claimInboxEvent } from "../../../packages/shared/outbox.mjs";
+import { DEFAULT_TENANT_ID, tenantIdFromHeaders } from "../../../packages/shared/tenant.mjs";
+import { validateProductionConfig } from "../../../packages/shared/config.mjs";
 import { reseedOperations } from "./seed.mjs";
 
 const port = Number(process.env.PORT || 4107);
 const DB = "operations";
 
+validateProductionConfig("operations-service");
 await bootstrap();
 
 createJsonService({
   name: "operations-service",
   port,
+  internalAuthRequired: true,
   routes: [
-    route("GET", "/health", () => ok({ status: "ok", service: "operations-service" })),
+    route("GET", "/health", () => ok({ status: "ok", service: "operations-service" }), { public: true }),
     route("GET", "/ready", async () => {
       await query(DB, "SELECT 1");
       return ok({ status: "ready" });
-    }),
+    }, { public: true }),
     route("POST", "/reset", async () => {
       await reseedOperations();
       return ok(await listProviders());
     }),
-    route("GET", "/providers", async () => ok(await listProviders())),
-    route("GET", "/providers/:id", async ({ params }) => ok(await findProvider(params.id))),
-    route("POST", "/providers/:id/toggle", async ({ params }) => {
-      const provider = await findProvider(params.id);
+    route("GET", "/providers", async ({ headers }) => ok(await listProviders(tenantIdFromHeaders(headers)))),
+    route("GET", "/providers/:id", async ({ params, headers }) => ok(await findProvider(params.id, tenantIdFromHeaders(headers)))),
+    route("POST", "/providers/:id/toggle", async ({ params, body, headers }) => {
+      const tenantId = tenantIdFromHeaders(headers);
+      const provider = await findProvider(params.id, tenantId);
       const nextStatus = provider.status === "Operational" ? "Degraded" : "Operational";
       const nextIncident = nextStatus === "Degraded" ? "Manual route degradation" : "";
       const { rows } = await query(
         DB,
         "UPDATE operations.providers SET status = $1, incident = $2 WHERE id = $3 AND tenant_id = $4 RETURNING *",
-        [nextStatus, nextIncident, params.id, DEFAULT_TENANT_ID]
+        [nextStatus, nextIncident, params.id, tenantId]
       );
       const updated = toProviderShape(rows[0]);
-      await appendAudit("Marta Klein", "Provider status changed", updated.name, updated.status);
+      await appendAudit(body.actor || "System", "Provider status changed", updated.name, updated.status, tenantId);
       return ok(updated);
     }),
-    route("GET", "/audit", async () => ok(await listAudit())),
-    route("POST", "/audit", async ({ body }) => ok(await appendAudit(body.actor || "System", body.action, body.object, body.detail))),
-    route("GET", "/alerts", async () => ok(await listAlerts())),
-    route("POST", "/alerts", async ({ body }) => {
+    route("GET", "/audit", async ({ headers }) => ok(await listAudit(tenantIdFromHeaders(headers)))),
+    route("POST", "/audit", async ({ body, headers }) => {
+      const tenantId = tenantIdFromHeaders(headers);
+      return ok(await withInboxDedup(headers, "operations", async (client) => {
+        return appendAudit(body.actor || "System", body.action, body.object, body.detail, tenantId, client);
+      }));
+    }),
+    route("GET", "/alerts", async ({ headers }) => ok(await listAlerts(tenantIdFromHeaders(headers)))),
+    route("POST", "/alerts", async ({ body, headers }) => {
+      const tenantId = tenantIdFromHeaders(headers);
       const alert = {
         id: createId("alt"),
         severity: body.severity || "Medium",
@@ -48,26 +59,22 @@ createJsonService({
         detail: body.detail || "",
         status: body.status || "Open"
       };
-      await query(
-        DB,
-        "INSERT INTO operations.alerts (id, tenant_id, severity, title, detail, status) VALUES ($1, $2, $3, $4, $5, $6)",
-        [alert.id, DEFAULT_TENANT_ID, alert.severity, alert.title, alert.detail, alert.status]
-      );
-      return ok(alert);
+      return ok(await withInboxDedup(headers, "operations", async (client) => insertAlert(alert, tenantId, client)));
     }),
-    route("POST", "/incidents/simulate", async () => {
+    route("POST", "/incidents/simulate", async ({ headers }) => {
+      const tenantId = tenantIdFromHeaders(headers);
       const { rows } = await query(
         DB,
         "SELECT * FROM operations.providers WHERE tenant_id = $1 AND status = 'Operational' LIMIT 1",
-        [DEFAULT_TENANT_ID]
+        [tenantId]
       );
       if (!rows[0]) {
         throw httpError(409, "No operational provider available to degrade", "no_provider");
       }
       const { rows: updatedRows } = await query(
         DB,
-        "UPDATE operations.providers SET status = 'Degraded', incident = $1 WHERE id = $2 RETURNING *",
-        ["Synthetic latency incident", rows[0].id]
+        "UPDATE operations.providers SET status = 'Degraded', incident = $1 WHERE id = $2 AND tenant_id = $3 RETURNING *",
+        ["Synthetic latency incident", rows[0].id, tenantId]
       );
       const provider = toProviderShape(updatedRows[0]);
       const alert = {
@@ -80,9 +87,9 @@ createJsonService({
       await query(
         DB,
         "INSERT INTO operations.alerts (id, tenant_id, severity, title, detail, status) VALUES ($1, $2, $3, $4, $5, $6)",
-        [alert.id, DEFAULT_TENANT_ID, alert.severity, alert.title, alert.detail, alert.status]
+        [alert.id, tenantId, alert.severity, alert.title, alert.detail, alert.status]
       );
-      await appendAudit("System monitor", "Provider incident opened", provider.name, provider.incident);
+      await appendAudit("System monitor", "Provider incident opened", provider.name, provider.incident, tenantId);
       return ok({ provider, alert });
     })
   ]
@@ -112,37 +119,60 @@ function toAuditShape(row) {
   return { id: row.id, at: row.at.toISOString(), actor: row.actor, action: row.action, object: row.object, detail: row.detail };
 }
 
-async function listProviders() {
-  const { rows } = await query(DB, "SELECT * FROM operations.providers WHERE tenant_id = $1 ORDER BY id", [DEFAULT_TENANT_ID]);
+async function listProviders(tenantId = DEFAULT_TENANT_ID) {
+  const { rows } = await query(DB, "SELECT * FROM operations.providers WHERE tenant_id = $1 ORDER BY id", [tenantId]);
   return rows.map(toProviderShape);
 }
 
-async function findProvider(id) {
-  const { rows } = await query(DB, "SELECT * FROM operations.providers WHERE id = $1 AND tenant_id = $2", [id, DEFAULT_TENANT_ID]);
+async function findProvider(id, tenantId = DEFAULT_TENANT_ID) {
+  const { rows } = await query(DB, "SELECT * FROM operations.providers WHERE id = $1 AND tenant_id = $2", [id, tenantId]);
   if (!rows[0]) {
     throw httpError(404, `provider ${id} not found`, "not_found");
   }
   return toProviderShape(rows[0]);
 }
 
-async function listAlerts() {
-  const { rows } = await query(DB, "SELECT * FROM operations.alerts WHERE tenant_id = $1 ORDER BY created_at DESC", [DEFAULT_TENANT_ID]);
+async function listAlerts(tenantId = DEFAULT_TENANT_ID) {
+  const { rows } = await query(DB, "SELECT * FROM operations.alerts WHERE tenant_id = $1 ORDER BY created_at DESC", [tenantId]);
   return rows.map(toAlertShape);
 }
 
-async function listAudit() {
-  const { rows } = await query(DB, "SELECT * FROM operations.audit_events WHERE tenant_id = $1 ORDER BY at DESC", [DEFAULT_TENANT_ID]);
+async function listAudit(tenantId = DEFAULT_TENANT_ID) {
+  const { rows } = await query(DB, "SELECT * FROM operations.audit_events WHERE tenant_id = $1 ORDER BY at DESC", [tenantId]);
   return rows.map(toAuditShape);
 }
 
-async function appendAudit(actor, action, object, detail) {
+async function insertAlert(alert, tenantId = DEFAULT_TENANT_ID, client = null) {
+  const q = client || { query: (...args) => query(DB, ...args) };
+  await q.query(
+    "INSERT INTO operations.alerts (id, tenant_id, severity, title, detail, status) VALUES ($1, $2, $3, $4, $5, $6)",
+    [alert.id, tenantId, alert.severity, alert.title, alert.detail, alert.status]
+  );
+  return alert;
+}
+
+async function appendAudit(actor, action, object, detail, tenantId = DEFAULT_TENANT_ID, client = null) {
   const event = { id: createId("aud"), at: new Date(), actor, action, object, detail: detail || "" };
-  await query(
-    DB,
+  const q = client || { query: (...args) => query(DB, ...args) };
+  await q.query(
     "INSERT INTO operations.audit_events (id, tenant_id, actor, action, object, detail, at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-    [event.id, DEFAULT_TENANT_ID, actor, action, object, event.detail, event.at]
+    [event.id, tenantId, actor, action, object, event.detail, event.at]
   );
   return toAuditShape(event);
+}
+
+async function withInboxDedup(headers, consumer, handler) {
+  const eventId = headers["x-event-id"];
+  if (!eventId) {
+    return handler();
+  }
+  return withTransaction(DB, async (client) => {
+    const shouldProcess = await claimInboxEvent(client, eventId, consumer);
+    if (!shouldProcess) {
+      return { duplicate: true, eventId };
+    }
+    return handler(client);
+  });
 }
 
 async function bootstrap() {

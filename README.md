@@ -10,6 +10,7 @@ Technology-only project folder for a MiCA-aligned corporate stablecoin treasury 
 - `docker-compose.yml` - local container orchestration.
 - `docs/ARCHITECTURE.md` - service map and design notes.
 - `docs/PRODUCTION_READINESS.md` - reliability status and remaining production gaps.
+- `docs/V3_PLAN.md` - V3 secure pilot foundation plan with milestones, tasks, and release gates.
 - `TECHNICAL_TASKS.md` - technology task and subtask backlog for MVP and later phases.
 
 ## Product Focus

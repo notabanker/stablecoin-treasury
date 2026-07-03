@@ -13,7 +13,9 @@ const processes = [
   ["reconciliation-service", "services/reconciliation-service/src/index.mjs", { PORT: "4106" }],
   ["operations-service", "services/operations-service/src/index.mjs", { PORT: "4107" }],
   ["payment-service", "services/payment-service/src/index.mjs", { PORT: "4104" }],
-  ["api-gateway", "services/api-gateway/src/index.mjs", { GATEWAY_PORT: "8080" }]
+  ["api-gateway", "services/api-gateway/src/index.mjs", { GATEWAY_PORT: "8080" }],
+  ["relay-worker", "services/relay-worker/src/index.mjs", { PORT: "9101" }],
+  ["job-worker", "services/job-worker/src/index.mjs", { PORT: "9102" }]
 ];
 
 const children = processes.map(([name, script, env]) => {

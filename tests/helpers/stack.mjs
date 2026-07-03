@@ -16,10 +16,16 @@ const serviceDefs = [
   ["reconciliation", "services/reconciliation-service/src/index.mjs", "PORT"],
   ["operations", "services/operations-service/src/index.mjs", "PORT"],
   ["payment", "services/payment-service/src/index.mjs", "PORT"],
-  ["gateway", "services/api-gateway/src/index.mjs", "GATEWAY_PORT"]
+  ["gateway", "services/api-gateway/src/index.mjs", "GATEWAY_PORT"],
+  ["relay", "services/relay-worker/src/index.mjs", "PORT"],
+  ["job", "services/job-worker/src/index.mjs", "PORT"]
 ];
 
-let nextPortBase = 5100;
+// Each test file gets a fresh module (and thus a fresh nextPortBase), but a single process runs
+// all test files so the module is shared. Use a hash of PID + time to stagger port ranges and
+// avoid collisions when parallel test files start stacks simultaneously.
+const portHash = (process.pid * 37 + Math.floor(Date.now() / 60000) * 31) % 5000;
+let nextPortBase = 20000 + portHash;
 
 function allocatePortBase() {
   const base = nextPortBase;
@@ -66,7 +72,9 @@ export async function startStack({ verbose = false } = {}) {
     reconciliation: portBase + 6,
     operations: portBase + 7,
     payment: portBase + 4,
-    gateway: portBase
+    gateway: portBase,
+    relay: portBase + 8,
+    job: portBase + 9
   };
   const database = await createTestDatabase();
 
@@ -86,22 +94,29 @@ export async function startStack({ verbose = false } = {}) {
   };
 
   const children = serviceDefs.map(([name, script, portEnvKey]) => {
+    const logs = [];
     const child = spawn(process.execPath, [script], {
       cwd: root,
       env: { ...sharedEnv, [portEnvKey]: String(ports[name]) },
       stdio: ["ignore", verbose ? "inherit" : "pipe", verbose ? "inherit" : "pipe"]
     });
     if (!verbose) {
-      child.stdout?.resume();
-      child.stderr?.resume();
+      const capture = (stream, chunk) => {
+        const lines = chunk.toString("utf8").split(/\r?\n/).filter(Boolean);
+        for (const line of lines) logs.push(`[${stream}] ${line}`);
+        if (logs.length > 80) logs.splice(0, logs.length - 80);
+      };
+      child.stdout?.on("data", (chunk) => capture("stdout", chunk));
+      child.stderr?.on("data", (chunk) => capture("stderr", chunk));
     }
-    return { name, child };
+    return { name, child, logs };
   });
 
   try {
-    await waitForAll(ports);
+    await waitForAll(ports, { timeoutMs: Number(process.env.TEST_STACK_READY_TIMEOUT_MS || 45000) });
   } catch (error) {
-    stopChildren(children);
+    error.message = `${error.message}\n${formatChildDiagnostics(children)}`;
+    await stopChildren(children);
     await dropDatabase(database.name);
     throw error;
   }
@@ -110,21 +125,39 @@ export async function startStack({ verbose = false } = {}) {
     baseUrl: `http://127.0.0.1:${ports.gateway}`,
     ports,
     databaseName: database.name,
+    // Exposed for failure-injection tests
+    _children: children,
+    _serviceDefs: serviceDefs,
+    _env: sharedEnv,
+    _root: root,
     async stop() {
-      stopChildren(children);
-      await sleep(150);
+      await stopChildren(children);
       await dropDatabase(database.name);
     }
   };
 }
 
-function stopChildren(children) {
-  for (const { child } of children) {
-    child.kill("SIGTERM");
-  }
+async function stopChildren(children) {
+  const promises = children.map(({ child }) => {
+    return new Promise((resolve) => {
+      if (child.exitCode !== null) return resolve();
+      child.once("exit", resolve);
+      child.kill("SIGTERM");
+    });
+  });
+  await Promise.allSettled(promises);
 }
 
-async function waitForAll(ports, timeoutMs = 15000) {
+function formatChildDiagnostics(children) {
+  return children.map(({ name, child, logs }) => {
+    const exit = child.exitCode === null ? "running" : `exit=${child.exitCode}`;
+    const signal = child.signalCode ? ` signal=${child.signalCode}` : "";
+    const recent = logs.length ? logs.slice(-20).join("\n") : "(no captured output)";
+    return `--- ${name} (${exit}${signal}) ---\n${recent}`;
+  }).join("\n");
+}
+
+async function waitForAll(ports, { timeoutMs = 45000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   const names = Object.keys(ports);
   const ready = new Set();

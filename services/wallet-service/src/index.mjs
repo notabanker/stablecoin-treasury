@@ -1,33 +1,36 @@
 import { query, withTransaction } from "../../../packages/shared/db.mjs";
 import { createJsonService, httpError, ok, route } from "../../../packages/shared/http.mjs";
-import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
+import { DEFAULT_TENANT_ID, tenantIdFromHeaders } from "../../../packages/shared/tenant.mjs";
+import { validateProductionConfig } from "../../../packages/shared/config.mjs";
 import { getOrCreateSharedAccount, getOrCreateWalletAccount, getWalletBalance, postTransaction } from "./ledger.mjs";
 import { reseedWallets } from "./seed.mjs";
 
 const port = Number(process.env.PORT || 4101);
 const DB = "wallet";
 
+validateProductionConfig("wallet-service");
 await bootstrap();
 
 createJsonService({
   name: "wallet-service",
   port,
+  internalAuthRequired: true,
   routes: [
-    route("GET", "/health", () => ok({ status: "ok", service: "wallet-service" })),
+    route("GET", "/health", () => ok({ status: "ok", service: "wallet-service" }), { public: true }),
     route("GET", "/ready", async () => {
       await query(DB, "SELECT 1");
       return ok({ status: "ready" });
-    }),
+    }, { public: true }),
     route("POST", "/reset", async () => {
       await reseedWallets();
       return ok(await listWallets());
     }),
-    route("GET", "/entities", async () => ok(await listEntities())),
-    route("GET", "/entities/:id", async ({ params }) => ok(await findEntity(params.id))),
-    route("GET", "/assets", async () => ok(await listAssets())),
-    route("GET", "/assets/:id", async ({ params }) => ok(await findAsset(params.id))),
-    route("GET", "/wallets", async () => ok(await listWallets())),
-    route("GET", "/wallets/:id", async ({ params }) => ok(await findWallet(params.id))),
+    route("GET", "/entities", async ({ headers }) => ok(await listEntities(tenantIdFromHeaders(headers)))),
+    route("GET", "/entities/:id", async ({ params, headers }) => ok(await findEntity(params.id, tenantIdFromHeaders(headers)))),
+    route("GET", "/assets", async ({ headers }) => ok(await listAssets(tenantIdFromHeaders(headers)))),
+    route("GET", "/assets/:id", async ({ params, headers }) => ok(await findAsset(params.id, tenantIdFromHeaders(headers)))),
+    route("GET", "/wallets", async ({ headers }) => ok(await listWallets(tenantIdFromHeaders(headers)))),
+    route("GET", "/wallets/:id", async ({ params, headers }) => ok(await findWallet(params.id, tenantIdFromHeaders(headers)))),
     // The debit request splits principal and fee so the ledger can route each correctly: the
     // fee always leaves to the shared fees account (a real cost either way), while the principal
     // goes to the destination wallet's own ledger account when the counterparty resolves to
@@ -36,6 +39,7 @@ createJsonService({
     // ledger existed, intra-group payments only ever debited the source wallet -- the money had
     // nowhere to land and simply vanished from the books.
     route("POST", "/wallets/:id/debit", async ({ params, body, headers }) => {
+      const tenantId = tenantIdFromHeaders(headers);
       const idempotencyKey = headers["idempotency-key"] || body.idempotencyKey;
       if (!idempotencyKey) {
         throw httpError(428, "Idempotency-Key is required for wallet debits", "idempotency_required");
@@ -56,7 +60,7 @@ createJsonService({
         // debits against the same wallet serialize on this row lock instead.
         const walletRows = await client.query("SELECT * FROM wallet.wallets WHERE id = $1 AND tenant_id = $2 FOR UPDATE", [
           params.id,
-          DEFAULT_TENANT_ID
+          tenantId
         ]);
         if (!walletRows.rows[0]) {
           throw httpError(404, `wallet ${params.id} not found`, "not_found");
@@ -64,43 +68,43 @@ createJsonService({
         const wallet = walletRows.rows[0];
 
         const existingTx = await client.query("SELECT * FROM wallet.ledger_transactions WHERE tenant_id = $1 AND idempotency_key = $2", [
-          DEFAULT_TENANT_ID,
+          tenantId,
           idempotencyKey
         ]);
         if (existingTx.rows[0]) {
-          const balance = await getWalletBalance(client, params.id);
+          const balance = await getWalletBalance(client, params.id, tenantId);
           return ok({ idempotencyKey, walletId: params.id, amount: total, balance, at: existingTx.rows[0].created_at.toISOString() });
         }
 
         if (wallet.status !== "Active") {
           throw httpError(409, `Wallet ${params.id} is not active`, "wallet_inactive");
         }
-        const currentBalance = await getWalletBalance(client, params.id);
+        const currentBalance = await getWalletBalance(client, params.id, tenantId);
         if (currentBalance < total) {
           throw httpError(409, "Insufficient wallet balance", "insufficient_balance");
         }
 
-        const sourceAccount = await getOrCreateWalletAccount(client, wallet.id, wallet.asset_id);
+        const sourceAccount = await getOrCreateWalletAccount(client, wallet.id, wallet.asset_id, tenantId);
         const entries = [{ accountId: sourceAccount.id, direction: "debit", amount: total }];
 
         let destinationWallet = null;
         if (body.destinationWalletId && body.destinationWalletId !== wallet.id) {
           const destRows = await client.query("SELECT * FROM wallet.wallets WHERE id = $1 AND tenant_id = $2 AND status = 'Active'", [
             body.destinationWalletId,
-            DEFAULT_TENANT_ID
+            tenantId
           ]);
           destinationWallet = destRows.rows[0] || null;
         }
 
         if (destinationWallet && destinationWallet.asset_id === wallet.asset_id) {
-          const destAccount = await getOrCreateWalletAccount(client, destinationWallet.id, destinationWallet.asset_id);
+          const destAccount = await getOrCreateWalletAccount(client, destinationWallet.id, destinationWallet.asset_id, tenantId);
           entries.push({ accountId: destAccount.id, direction: "credit", amount: principal });
         } else {
-          const clearingAccount = await getOrCreateSharedAccount(client, "settlement_clearing", wallet.asset_id);
+          const clearingAccount = await getOrCreateSharedAccount(client, "settlement_clearing", wallet.asset_id, tenantId);
           entries.push({ accountId: clearingAccount.id, direction: "credit", amount: principal });
         }
         if (fee > 0) {
-          const feesAccount = await getOrCreateSharedAccount(client, "fees", wallet.asset_id);
+          const feesAccount = await getOrCreateSharedAccount(client, "fees", wallet.asset_id, tenantId);
           entries.push({ accountId: feesAccount.id, direction: "credit", amount: fee });
         }
 
@@ -108,10 +112,11 @@ createJsonService({
           idempotencyKey,
           description: destinationWallet ? `Transfer ${wallet.id} -> ${destinationWallet.id}` : `Debit ${wallet.id} to external party`,
           paymentId: body.paymentId || null,
-          entries
+          entries,
+          tenantId
         });
 
-        const newBalance = await getWalletBalance(client, params.id);
+        const newBalance = await getWalletBalance(client, params.id, tenantId);
         return ok({ idempotencyKey, walletId: params.id, amount: total, balance: newBalance, at: new Date().toISOString() });
       });
     })
@@ -149,29 +154,29 @@ function toWalletShape(row) {
   };
 }
 
-async function listEntities() {
-  const { rows } = await query(DB, "SELECT * FROM wallet.legal_entities WHERE tenant_id = $1 ORDER BY id", [DEFAULT_TENANT_ID]);
+async function listEntities(tenantId = DEFAULT_TENANT_ID) {
+  const { rows } = await query(DB, "SELECT * FROM wallet.legal_entities WHERE tenant_id = $1 ORDER BY id", [tenantId]);
   return rows.map(toEntityShape);
 }
 
-async function findEntity(id) {
-  const { rows } = await query(DB, "SELECT * FROM wallet.legal_entities WHERE id = $1 AND tenant_id = $2", [id, DEFAULT_TENANT_ID]);
+async function findEntity(id, tenantId = DEFAULT_TENANT_ID) {
+  const { rows } = await query(DB, "SELECT * FROM wallet.legal_entities WHERE id = $1 AND tenant_id = $2", [id, tenantId]);
   if (!rows[0]) throw httpError(404, `entity ${id} not found`, "not_found");
   return toEntityShape(rows[0]);
 }
 
-async function listAssets() {
-  const { rows } = await query(DB, "SELECT * FROM wallet.assets WHERE tenant_id = $1 ORDER BY id", [DEFAULT_TENANT_ID]);
+async function listAssets(tenantId = DEFAULT_TENANT_ID) {
+  const { rows } = await query(DB, "SELECT * FROM wallet.assets WHERE tenant_id = $1 ORDER BY id", [tenantId]);
   return rows.map(toAssetShape);
 }
 
-async function findAsset(id) {
-  const { rows } = await query(DB, "SELECT * FROM wallet.assets WHERE id = $1 AND tenant_id = $2", [id, DEFAULT_TENANT_ID]);
+async function findAsset(id, tenantId = DEFAULT_TENANT_ID) {
+  const { rows } = await query(DB, "SELECT * FROM wallet.assets WHERE id = $1 AND tenant_id = $2", [id, tenantId]);
   if (!rows[0]) throw httpError(404, `asset ${id} not found`, "not_found");
   return toAssetShape(rows[0]);
 }
 
-async function listWallets() {
+async function listWallets(tenantId = DEFAULT_TENANT_ID) {
   const { rows } = await query(
     DB,
     `SELECT w.*, wb.balance
@@ -179,19 +184,19 @@ async function listWallets() {
      LEFT JOIN wallet.wallet_balances wb ON wb.wallet_id = w.id
      WHERE w.tenant_id = $1
      ORDER BY w.id`,
-    [DEFAULT_TENANT_ID]
+    [tenantId]
   );
   return rows.map(toWalletShape);
 }
 
-async function findWallet(id) {
+async function findWallet(id, tenantId = DEFAULT_TENANT_ID) {
   const { rows } = await query(
     DB,
     `SELECT w.*, wb.balance
      FROM wallet.wallets w
      LEFT JOIN wallet.wallet_balances wb ON wb.wallet_id = w.id
      WHERE w.id = $1 AND w.tenant_id = $2`,
-    [id, DEFAULT_TENANT_ID]
+    [id, tenantId]
   );
   if (!rows[0]) throw httpError(404, `wallet ${id} not found`, "not_found");
   return toWalletShape(rows[0]);

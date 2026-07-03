@@ -32,13 +32,15 @@ test("full payment lifecycle settles with balanced journals and a matched recon 
   const approve = await api(stack.baseUrl, `/payments/${create.data.payment.id}/approve`, { method: "POST" });
   assert.equal(approve.data.payment.status, "Approved");
 
-  const execute = await api(stack.baseUrl, `/payments/${create.data.payment.id}/execute`, { method: "POST" });
-  assert.equal(execute.data.payment.status, "Settled");
+  await api(stack.baseUrl, `/payments/${create.data.payment.id}/execute`, { method: "POST" });
+  // Execution is now async (saga worker picks up the job and settles). Poll for settlement.
+  const state = await waitForSettlement(stack.baseUrl, create.data.payment.id);
+  const settled = state.data.payments.find((p) => p.id === create.data.payment.id);
+  assert.equal(settled.status, "Settled");
 
-  const finalState = execute.data.state;
-  const walletAfter = finalState.wallets.find((w) => w.id === "wal-hold-eur");
-  const journalLines = finalState.journalEntries.filter((e) => e.paymentId === create.data.payment.id);
-  const reconRows = finalState.reconciliation.filter((r) => r.paymentId === create.data.payment.id);
+  const walletAfter = state.data.wallets.find((w) => w.id === "wal-hold-eur");
+  const journalLines = state.data.journalEntries.filter((e) => e.paymentId === create.data.payment.id);
+  const reconRows = state.data.reconciliation.filter((r) => r.paymentId === create.data.payment.id);
 
   assert.equal(journalLines.length, 3);
   const debit = journalLines.reduce((sum, e) => sum + e.debit, 0);
@@ -66,14 +68,16 @@ test("intra-group transfers credit the destination wallet instead of losing the 
     body: JSON.stringify({ amount: 10000, counterpartyId: "cp-vega-pl", sourceWalletId: "wal-hold-eur", type: "Intra-group" })
   });
   await api(stack.baseUrl, `/payments/${create.data.payment.id}/approve`, { method: "POST" });
-  const executed = await api(stack.baseUrl, `/payments/${create.data.payment.id}/execute`, { method: "POST" });
-  assert.equal(executed.data.payment.status, "Settled");
+  await api(stack.baseUrl, `/payments/${create.data.payment.id}/execute`, { method: "POST" });
+  const state = await waitForSettlement(stack.baseUrl, create.data.payment.id);
+  const settled = state.data.payments.find((p) => p.id === create.data.payment.id);
+  assert.equal(settled.status, "Settled");
 
-  const sourceAfter = executed.data.state.wallets.find((w) => w.id === "wal-hold-eur");
-  const destAfter = executed.data.state.wallets.find((w) => w.id === "wal-pl-eur");
+  const sourceAfter = state.data.wallets.find((w) => w.id === "wal-hold-eur");
+  const destAfter = state.data.wallets.find((w) => w.id === "wal-pl-eur");
 
-  const principal = executed.data.payment.amount;
-  const fee = executed.data.payment.fee;
+  const principal = settled.amount;
+  const fee = settled.fee;
   assert.equal(roundTo2(sourceBefore.balance - sourceAfter.balance), roundTo2(principal + fee), "source wallet loses principal + fee");
   assert.equal(roundTo2(destAfter.balance - destBefore.balance), roundTo2(principal), "destination wallet gains exactly the principal");
 });
@@ -90,15 +94,36 @@ test("resuming execute from Executing does not double-debit the wallet", async (
   await api(stack.baseUrl, `/payments/${create.data.payment.id}/approve`, { method: "POST" });
 
   const first = await api(stack.baseUrl, `/payments/${create.data.payment.id}/execute`, { method: "POST" });
-  assert.equal(first.data.payment.status, "Settled");
-  const walletAfterFirst = first.data.state.wallets.find((w) => w.id === "wal-de-eur");
+  assert.ok(first.data.accepted, "first execute enqueues saga");
 
+  const state = await waitForSettlement(stack.baseUrl, create.data.payment.id);
+  const settled = state.data.payments.find((p) => p.id === create.data.payment.id);
+  assert.equal(settled.status, "Settled");
+  const walletAfterFirst = state.data.wallets.find((w) => w.id === "wal-de-eur");
+
+  // Second execute on an already-settled payment should be a no-op.
   const second = await api(stack.baseUrl, `/payments/${create.data.payment.id}/execute`, { method: "POST" });
-  assert.equal(second.data.payment.status, "Settled");
   const walletAfterSecond = second.data.state.wallets.find((w) => w.id === "wal-de-eur");
 
   assert.equal(walletAfterFirst.balance, walletAfterSecond.balance);
 });
+
+async function waitForSettlement(baseUrl, paymentId, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = await api(baseUrl, "/state");
+    const payment = state.data.payments?.find((p) => p.id === paymentId);
+    if (payment && (payment.status === "Settled" || payment.status === "Failed" || payment.status === "Blocked")) {
+      return state;
+    }
+    await sleep(200);
+  }
+  throw new Error(`Payment ${paymentId} did not settle within ${timeoutMs}ms`);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 test("blocked counterparty payments never reach execution", async (t) => {
   const stack = await startStack();

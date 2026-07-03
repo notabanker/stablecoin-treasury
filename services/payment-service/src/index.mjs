@@ -1,8 +1,11 @@
-import { createId, estimateFee, randomHex } from "../../../packages/shared/data.mjs";
+import { createId, estimateFee } from "../../../packages/shared/data.mjs";
 import { query, withTransaction } from "../../../packages/shared/db.mjs";
 import { createJsonService, httpError, ok, route } from "../../../packages/shared/http.mjs";
 import { serviceGet, servicePost } from "../../../packages/shared/service-client.mjs";
-import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
+import { DEFAULT_TENANT_ID, tenantIdFromHeaders } from "../../../packages/shared/tenant.mjs";
+import { validateProductionConfig } from "../../../packages/shared/config.mjs";
+import { appendOutboxEvents } from "../../../packages/shared/outbox.mjs";
+import { enqueueJob, enqueueJobInTx } from "../../../packages/shared/jobs.mjs";
 import { requiredApprovalsFor } from "./approvals.mjs";
 import { allocateReference, completeIdempotencyKey, hashRequest, releaseIdempotencyKey, reserveIdempotencyKey } from "./idempotency.mjs";
 import { reseedPayments } from "./seed.mjs";
@@ -10,76 +13,63 @@ import { reseedPayments } from "./seed.mjs";
 const port = Number(process.env.PORT || 4104);
 const DB = "payment";
 
+validateProductionConfig("payment-service");
 await bootstrap();
 
 createJsonService({
   name: "payment-service",
   port,
+  internalAuthRequired: true,
   routes: [
-    route("GET", "/health", () => ok({ status: "ok", service: "payment-service" })),
+    route("GET", "/health", () => ok({ status: "ok", service: "payment-service" }), { public: true }),
     route("GET", "/ready", async () => {
       await query(DB, "SELECT 1");
       return ok({ status: "ready" });
-    }),
+    }, { public: true }),
     route("POST", "/reset", async () => {
       await reseedPayments();
       return ok(await listPayments());
     }),
-    route("GET", "/payments", async () => ok(await listPayments())),
-    route("GET", "/payments/:id", async ({ params }) => ok(await findPayment(params.id))),
-    route("POST", "/payments", async ({ body, headers }) => ok({ payment: await createPayment(body, headers["idempotency-key"]) })),
-    route("POST", "/payments/:id/approve", async ({ params }) => ok({ payment: await approvePayment(params.id) })),
-    route("POST", "/payments/:id/execute", async ({ params }) => ok({ payment: await executePayment(params.id) })),
-    route("POST", "/payments/:id/cancel", async ({ params }) => ok({ payment: await cancelPayment(params.id) }))
+    route("GET", "/payments", async ({ headers }) => ok(await listPayments(tenantIdFromHeaders(headers)))),
+    route("GET", "/payments/:id", async ({ params, headers }) => ok(await findPayment(params.id, tenantIdFromHeaders(headers)))),
+    route("GET", "/payments/:id/attempts", async ({ params, headers }) => ok(await listExecutionAttempts(params.id, tenantIdFromHeaders(headers)))),
+    route("POST", "/payments", async ({ body, headers }) => ok({ payment: await createPayment(body, headers["idempotency-key"], tenantIdFromHeaders(headers)) })),
+    route("POST", "/payments/:id/approve", async ({ params, headers }) => ok({ payment: await approvePayment(params.id, tenantIdFromHeaders(headers)) })),
+    route("POST", "/payments/:id/execute", async ({ params, headers }) => ok(await executePayment(params.id, tenantIdFromHeaders(headers)))),
+    route("POST", "/payments/:id/cancel", async ({ params, headers }) => ok({ payment: await cancelPayment(params.id, tenantIdFromHeaders(headers)) })),
+    // Repair endpoints for stuck payments (M3.3)
+    route("GET", "/repair", async ({ headers }) => ok(await listRepairable(tenantIdFromHeaders(headers)))),
+    route("POST", "/repair/:id/retry", async ({ params, headers }) => ok(await retryExecution(params.id, tenantIdFromHeaders(headers))))
   ]
 });
 
-async function createPayment(input, idempotencyKey) {
+async function createPayment(input, idempotencyKey, tenantId = DEFAULT_TENANT_ID) {
   let requestHash = null;
   if (idempotencyKey) {
     requestHash = hashRequest(input);
-    const reservation = await reserveIdempotencyKey("create", idempotencyKey, requestHash);
+    const reservation = await reserveIdempotencyKey("create", idempotencyKey, requestHash, tenantId);
     if (reservation.outcome === "hash_mismatch") {
       throw httpError(422, "Idempotency-Key was already used with a different request body", "idempotency_key_reuse");
     }
-    if (reservation.outcome === "done") {
-      return findPayment(reservation.paymentId);
+    if (reservation.outcome === "pending") {
+      throw httpError(409, "Idempotency-Key is already being processed; retry with the same key", "idempotency_in_progress");
     }
-    // outcome === "reserved": this call owns the key and must complete or release it. Unlike the
-    // JS in-process lock this replaced, there is no "in_progress" outcome to handle here --
-    // reserveIdempotencyKey's INSERT blocked on any concurrent racer until it resolved.
+    if (reservation.outcome === "done") {
+      return findPayment(reservation.paymentId, tenantId);
+    }
   }
 
   try {
-    const wallet = await serviceGet("wallet", `/wallets/${input.sourceWalletId}`);
-    const counterparty = await serviceGet("compliance", `/counterparties/${input.counterpartyId}`);
-    const policy = await serviceGet("policy", "/policies");
+    const wallet = await serviceGet("wallet", `/wallets/${input.sourceWalletId}`, { tenantId });
+    const counterparty = await serviceGet("compliance", `/counterparties/${input.counterpartyId}`, { tenantId });
+    const policy = await serviceGet("policy", "/policies", { tenantId });
     const amount = Number(input.amount || 0);
     if (!Number.isFinite(amount) || amount <= 0) {
       throw httpError(422, "Payment amount must be positive", "invalid_amount");
     }
 
-    const payment = {
-      id: createId("pay"),
-      reference: await allocateReference(),
-      type: input.type || "Supplier",
-      sourceWalletId: wallet.id,
-      counterpartyId: counterparty.id,
-      asset: wallet.asset,
-      amount,
-      fee: estimateFee(amount, wallet.asset),
-      status: "Pending approval",
-      approvals: 0,
-      requiredApprovals: requiredApprovalsFor(amount, wallet.asset, policy),
-      screenResult: counterparty.status === "Approved" ? "Clear" : counterparty.status,
-      createdAt: new Date().toISOString(),
-      settledAt: "",
-      providerRef: "",
-      chainRef: "",
-      memo: String(input.memo || "").trim()
-    };
-
-    const evaluation = await evaluatePayment(payment);
+    const payment = buildPaymentShape(input, wallet, counterparty, policy, amount);
+    const evaluation = await evaluatePayment(payment, tenantId);
     let autoApproved = false;
     if (evaluation.decision.status === "Blocked") {
       payment.status = "Blocked";
@@ -88,45 +78,98 @@ async function createPayment(input, idempotencyKey) {
       autoApproved = true;
     }
 
-    await insertPayment(payment);
-    if (idempotencyKey) {
-      await completeIdempotencyKey("create", idempotencyKey, payment.id);
-    }
+    const outboxEvents = withTenant(buildCreationOutboxEvents(payment, evaluation, counterparty, autoApproved), tenantId);
 
-    if (evaluation.decision.status === "Blocked") {
-      await bestEffortPost("reconciliation", "/reconciliation/exceptions", {
-        payment,
-        issue: evaluation.decision.detail,
-        source: "Policy engine"
-      });
-      await bestEffortPost("operations", "/alerts", {
-        severity: "High",
-        title: `${payment.reference} blocked`,
-        detail: evaluation.decision.detail
-      });
-      await audit("Policy engine", "Payment blocked", payment.reference, evaluation.decision.detail);
-    } else if (autoApproved) {
-      await audit(
-        "Policy engine",
-        "Payment auto-approved",
-        payment.reference,
-        `${payment.asset} ${payment.amount} to ${counterparty.name} auto-approved (below approval threshold)`
-      );
-    } else {
-      await audit("Marta Klein", "Payment created", payment.reference, `${payment.asset} ${payment.amount} to ${counterparty.name}`);
-    }
+    await withTransaction(DB, async (client) => {
+      await insertPaymentInTx(client, payment, tenantId);
+      if (idempotencyKey) {
+        await completeIdempotencyKey("create", idempotencyKey, payment.id, client, tenantId);
+      }
+      await appendOutboxEvents(client, outboxEvents);
+    });
 
     return payment;
   } catch (error) {
     if (idempotencyKey) {
-      await releaseIdempotencyKey("create", idempotencyKey);
+      await releaseIdempotencyKey("create", idempotencyKey, tenantId);
     }
     throw error;
   }
 }
 
-async function approvePayment(id) {
-  const payment = await findPayment(id);
+function buildPaymentShape(input, wallet, counterparty, policy, amount) {
+  return {
+    id: createId("pay"),
+    reference: "", // Assigned in the transaction below to keep the seq call inside the tx
+    type: input.type || "Supplier",
+    sourceWalletId: wallet.id,
+    counterpartyId: counterparty.id,
+    asset: wallet.asset,
+    amount,
+    fee: estimateFee(amount, wallet.asset),
+    status: "Pending approval",
+    approvals: 0,
+    requiredApprovals: requiredApprovalsFor(amount, wallet.asset, policy),
+    screenResult: counterparty.status === "Approved" ? "Clear" : counterparty.status,
+    createdAt: new Date().toISOString(),
+    settledAt: "",
+    providerRef: "",
+    chainRef: "",
+    memo: String(input.memo || "").trim()
+  };
+}
+
+function buildCreationOutboxEvents(payment, evaluation, counterparty, autoApproved) {
+  if (evaluation.decision.status === "Blocked") {
+    return [
+      {
+        aggregateType: "payment",
+        aggregateId: payment.id,
+        eventType: "reconciliation.exception_opened",
+        payload: { payment, issue: evaluation.decision.detail, source: "Policy engine" }
+      },
+      {
+        aggregateType: "payment",
+        aggregateId: payment.id,
+        eventType: "operations.alert_created",
+        payload: { severity: "High", title: `${payment.reference} blocked`, detail: evaluation.decision.detail }
+      },
+      {
+        aggregateType: "payment",
+        aggregateId: payment.id,
+        eventType: "audit.event_recorded",
+        payload: { actor: "Policy engine", action: "Payment blocked", object: payment.reference, detail: evaluation.decision.detail }
+      }
+    ];
+  }
+  if (autoApproved) {
+    return [{
+      aggregateType: "payment",
+      aggregateId: payment.id,
+      eventType: "audit.event_recorded",
+      payload: {
+        actor: "Policy engine",
+        action: "Payment auto-approved",
+        object: payment.reference,
+        detail: `${payment.asset} ${payment.amount} to ${counterparty.name} auto-approved (below approval threshold)`
+      }
+    }];
+  }
+  return [{
+    aggregateType: "payment",
+    aggregateId: payment.id,
+    eventType: "audit.event_recorded",
+    payload: {
+      actor: "System",
+      action: "Payment created",
+      object: payment.reference,
+      detail: `${payment.asset} ${payment.amount} to ${counterparty.name}`
+    }
+  }];
+}
+
+async function approvePayment(id, tenantId = DEFAULT_TENANT_ID) {
+  const payment = await findPayment(id, tenantId);
   if (["Approved", "Executing", "Settled"].includes(payment.status)) {
     return payment;
   }
@@ -134,121 +177,108 @@ async function approvePayment(id) {
     throw httpError(409, `Payment ${payment.reference} is not pending approval`, "invalid_state");
   }
 
-  const evaluation = await evaluatePayment(payment);
+  const evaluation = await evaluatePayment(payment, tenantId);
   if (evaluation.decision.status === "Blocked") {
-    const blocked = await transitionIfStatus(id, "Pending approval", { status: "Blocked" });
-    await audit("Policy engine", "Payment blocked", payment.reference, evaluation.decision.detail);
-    return blocked || (await findPayment(id));
+    return withTransaction(DB, async (client) => {
+      const updated = await transitionInTx(client, id, "Pending approval", { status: "Blocked" }, tenantId);
+      await appendOutboxEvents(client, withTenant([{
+        aggregateType: "payment",
+        aggregateId: id,
+        eventType: "audit.event_recorded",
+        payload: { actor: "Policy engine", action: "Payment blocked", object: payment.reference, detail: evaluation.decision.detail }
+      }], tenantId));
+      return updated || (await findPayment(id, tenantId));
+    });
   }
   if (evaluation.decision.status === "Review") {
     throw httpError(409, `Payment ${payment.reference} requires review before approval`, "review_required");
   }
 
-  // The evaluate() call above is a read-only network round trip and does not need to hold a row
-  // lock. The actual approvals++ / status transition below is the critical section that raced
-  // under concurrent calls before this port (see the M0 lock.mjs comment this replaces): it runs
-  // inside a single short transaction that re-reads the row FOR UPDATE, so two concurrent
-  // approvals on the same payment serialize here instead of both incrementing from a stale read.
   const updated = await withTransaction(DB, async (client) => {
-    const { rows } = await client.query("SELECT * FROM payment.payments WHERE id = $1 AND tenant_id = $2 FOR UPDATE", [id, DEFAULT_TENANT_ID]);
+    const { rows } = await client.query(
+      "SELECT * FROM payment.payments WHERE id = $1 AND tenant_id = $2 FOR UPDATE", [id, tenantId]
+    );
     const current = fromRow(rows[0]);
     if (current.status !== "Pending approval") {
-      // Another concurrent call already moved this payment past Pending approval while we were
-      // evaluating; nothing left for this call to do.
       return current;
     }
     const approvals = current.approvals + 1;
     const nextStatus = approvals >= current.requiredApprovals ? "Approved" : "Pending approval";
     const { rows: updatedRows } = await client.query(
       "UPDATE payment.payments SET approvals = $1, status = $2 WHERE id = $3 AND tenant_id = $4 RETURNING *",
-      [approvals, nextStatus, id, DEFAULT_TENANT_ID]
+      [approvals, nextStatus, id, tenantId]
     );
-    return fromRow(updatedRows[0]);
+    const result = fromRow(updatedRows[0]);
+    await appendOutboxEvents(client, withTenant([{
+      aggregateType: "payment",
+      aggregateId: id,
+      eventType: "audit.event_recorded",
+      payload: {
+        actor: "System",
+        action: "Payment approved",
+        object: result.reference,
+        detail: `${result.approvals}/${result.requiredApprovals} approvals`
+      }
+    }], tenantId));
+    return result;
   });
-  await audit("Marta Klein", "Payment approved", updated.reference, `${updated.approvals}/${updated.requiredApprovals} approvals`);
   return updated;
 }
 
-async function executePayment(id) {
-  const payment = await findPayment(id);
+async function executePayment(id, tenantId = DEFAULT_TENANT_ID) {
+  const payment = await findPayment(id, tenantId);
+
   if (payment.status === "Settled") {
-    return payment;
+    return { accepted: false, payment, message: "Already settled" };
   }
-  if (!["Approved", "Executing"].includes(payment.status)) {
+  if (payment.status === "Executing") {
+    return { accepted: true, payment, message: "Execution is already in progress" };
+  }
+  if (payment.status !== "Approved") {
     throw httpError(409, `Payment ${payment.reference} is not approved`, "invalid_state");
   }
 
-  const context = await getPaymentContext(payment);
-  if (payment.status === "Approved") {
-    const evaluation = await servicePost("policy", "/evaluate", { payment, ...context });
-    if (evaluation.decision.status === "Blocked") {
-      const blocked = await transitionIfStatus(id, "Approved", { status: "Blocked" });
-      await audit("Policy engine", "Execution blocked", payment.reference, evaluation.decision.detail);
-      return blocked || (await findPayment(id));
-    }
-    if (evaluation.decision.status === "Review") {
-      throw httpError(409, `Payment ${payment.reference} requires review before execution`, "review_required");
-    }
+  const context = await getPaymentContext(payment, tenantId);
+  const evaluation = await servicePost("policy", "/evaluate", { payment, ...context }, { tenantId });
 
-    // Written and committed before the wallet debit call below so a crash mid-debit leaves the
-    // payment visibly "Executing" rather than silently stuck at "Approved" -- this is what makes
-    // a retried execute() call resumable instead of a second, conflicting attempt.
-    await transitionIfStatus(id, "Approved", { status: "Executing" });
+  if (evaluation.decision.status === "Blocked") {
+    return withTransaction(DB, async (client) => {
+      const updated = await transitionInTx(client, id, "Approved", { status: "Blocked" }, tenantId);
+      await appendOutboxEvents(client, withTenant([{
+        aggregateType: "payment",
+        aggregateId: id,
+        eventType: "audit.event_recorded",
+        payload: { actor: "Policy engine", action: "Execution blocked", object: payment.reference, detail: evaluation.decision.detail }
+      }], tenantId));
+      return { accepted: false, payment: updated || (await findPayment(id, tenantId)), message: "Blocked by policy" };
+    });
+  }
+  if (evaluation.decision.status === "Review") {
+    throw httpError(409, `Payment ${payment.reference} requires review before execution`, "review_required");
   }
 
-  // Resolve whether the counterparty's wallet address matches a wallet this tenant already owns
-  // (an intra-group transfer) so wallet-service can credit that wallet's own ledger account
-  // instead of the external settlement_clearing account -- without this, intra-group payments
-  // debited the source wallet with nowhere for the money to land.
-  const destinationWallet = context.wallets.find(
-    (candidate) => candidate.id !== payment.sourceWalletId && candidate.address === context.counterparty.wallet && candidate.asset === payment.asset
-  );
-
-  let debited;
-  try {
-    debited = await servicePost(
-      "wallet",
-      `/wallets/${payment.sourceWalletId}/debit`,
-      {
-        principal: payment.amount,
-        fee: payment.fee,
-        destinationWalletId: destinationWallet?.id,
-        paymentId: payment.id
-      },
-      { idempotencyKey: `debit:${payment.id}` }
-    );
-  } catch (error) {
-    if (error.status === 409) {
-      await transitionIfStatus(id, "Executing", { status: "Failed" });
+  // Transition to Executing and enqueue the saga job in a single transaction so we never
+  // have a payment stuck at Executing without a corresponding job.
+  const updated = await withTransaction(DB, async (client) => {
+    const transitioned = await transitionInTx(client, id, "Approved", { status: "Executing" }, tenantId);
+    if (!transitioned) {
+      throw httpError(409, `Payment ${payment.reference} state changed concurrently`, "concurrent_modification");
     }
-    throw error;
-  }
+    await enqueueJobInTx(client, "execute-payment", { paymentId: id, tenantId }, { maxAttempts: 5, tenantId });
+    await appendOutboxEvents(client, withTenant([{
+      aggregateType: "payment",
+      aggregateId: id,
+      eventType: "audit.event_recorded",
+      payload: { actor: "System", action: "Execution enqueued", object: payment.reference, detail: "Saga job enqueued" }
+    }], tenantId));
+    return transitioned;
+  });
 
-  const providerRef = payment.providerRef || `ARC-${randomHex(5)}`;
-  const chainRef = payment.chainRef || `0x${randomHex(14).toLowerCase()}`;
-  await query(DB, "UPDATE payment.payments SET provider_ref = $1, chain_ref = $2 WHERE id = $3 AND tenant_id = $4", [
-    providerRef,
-    chainRef,
-    id,
-    DEFAULT_TENANT_ID
-  ]);
-  const settlingPayment = { ...payment, providerRef, chainRef, status: "Executing" };
-
-  await servicePost("accounting", "/journals/from-payment", { payment: settlingPayment, ...context });
-  await servicePost("reconciliation", "/reconciliation/matched", { payment: settlingPayment });
-
-  const settledAt = payment.settledAt || new Date().toISOString();
-  await query(DB, "UPDATE payment.payments SET status = 'Settled', settled_at = $1 WHERE id = $2 AND tenant_id = $3", [
-    settledAt,
-    id,
-    DEFAULT_TENANT_ID
-  ]);
-  await audit("Arcadia Custody Bank", "Payment settled", payment.reference, `Provider reference ${providerRef}`);
-  return findPayment(id);
+  return { accepted: true, payment: updated, message: "Payment execution enqueued" };
 }
 
-async function cancelPayment(id) {
-  const payment = await findPayment(id);
+async function cancelPayment(id, tenantId = DEFAULT_TENANT_ID) {
+  const payment = await findPayment(id, tenantId);
   if (payment.status === "Cancelled") {
     return payment;
   }
@@ -256,98 +286,144 @@ async function cancelPayment(id) {
     throw httpError(409, `Payment ${payment.reference} cannot be cancelled`, "invalid_state");
   }
   const updated = await withTransaction(DB, async (client) => {
-    const { rows } = await client.query("SELECT * FROM payment.payments WHERE id = $1 AND tenant_id = $2 FOR UPDATE", [id, DEFAULT_TENANT_ID]);
+    const { rows } = await client.query(
+      "SELECT * FROM payment.payments WHERE id = $1 AND tenant_id = $2 FOR UPDATE", [id, tenantId]
+    );
     const current = fromRow(rows[0]);
     if (!["Pending approval", "Approved"].includes(current.status)) {
       return current;
     }
     const { rows: updatedRows } = await client.query(
       "UPDATE payment.payments SET status = 'Cancelled' WHERE id = $1 AND tenant_id = $2 RETURNING *",
-      [id, DEFAULT_TENANT_ID]
+      [id, tenantId]
     );
-    return fromRow(updatedRows[0]);
+    const result = fromRow(updatedRows[0]);
+    await appendOutboxEvents(client, withTenant([{
+      aggregateType: "payment",
+      aggregateId: id,
+      eventType: "audit.event_recorded",
+      payload: { actor: "Marta Klein", action: "Payment cancelled", object: result.reference, detail: "User cancelled payment before execution" }
+    }], tenantId));
+    return result;
   });
-  await audit("Marta Klein", "Payment cancelled", updated.reference, "User cancelled payment before execution");
   return updated;
 }
 
-async function evaluatePayment(payment) {
-  const context = await getPaymentContext(payment);
-  return servicePost("policy", "/evaluate", { payment, ...context });
+// — Repair helpers (M3.3) —
+
+async function listRepairable(tenantId = DEFAULT_TENANT_ID) {
+  const { rows } = await query(
+    DB,
+    "SELECT * FROM payment.payments WHERE tenant_id = $1 AND (status = 'Executing' OR status = 'Failed') ORDER BY created_at DESC",
+    [tenantId]
+  );
+  const results = [];
+  for (const row of rows) {
+    const payment = fromRow(row);
+    const [attempts, jobs] = await Promise.all([
+      fetchAttempts(payment.id, tenantId),
+      fetchJobsForPayment(payment.id, tenantId)
+    ]);
+    results.push({ payment, attempts, jobs });
+  }
+  return results;
 }
 
-async function getPaymentContext(payment) {
-  const wallet = await serviceGet("wallet", `/wallets/${payment.sourceWalletId}`);
-  const entity = await serviceGet("wallet", `/entities/${wallet.entityId}`);
-  const asset = await serviceGet("wallet", `/assets/${payment.asset}`);
-  const counterparty = await serviceGet("compliance", `/counterparties/${payment.counterpartyId}`);
-  const provider = await serviceGet("operations", `/providers/${wallet.providerId}`);
-  const wallets = await serviceGet("wallet", "/wallets");
+async function retryExecution(id, tenantId = DEFAULT_TENANT_ID) {
+  const payment = await findPayment(id, tenantId);
+  if (!["Executing", "Failed"].includes(payment.status)) {
+    throw httpError(409, `Payment ${payment.reference} is not in a retryable state`, "invalid_state");
+  }
+
+  // Always enqueue a new saga job. The saga handler is idempotent at every step, so
+  // concurrent or duplicate jobs for the same payment are safe — each step (ledger debit,
+  // journal creation, reconciliation) deduplicates by key or constraint.
+  if (payment.status === "Failed") {
+    await query(
+      DB,
+      "UPDATE payment.payments SET status = 'Executing' WHERE id = $1 AND tenant_id = $2 AND status = 'Failed'",
+      [id, tenantId]
+    );
+  }
+
+  const job = await enqueueJob("execute-payment", { paymentId: id, tenantId }, { maxAttempts: 5, tenantId });
+  return {
+    accepted: true,
+    jobId: job.id,
+    payment: await findPayment(id, tenantId),
+    message: "Payment execution retry enqueued"
+  };
+}
+
+// — Database helpers —
+
+async function evaluatePayment(payment, tenantId = DEFAULT_TENANT_ID) {
+  const context = await getPaymentContext(payment, tenantId);
+  return servicePost("policy", "/evaluate", { payment, ...context }, { tenantId });
+}
+
+async function getPaymentContext(payment, tenantId = DEFAULT_TENANT_ID) {
+  const wallet = await serviceGet("wallet", `/wallets/${payment.sourceWalletId}`, { tenantId });
+  const entity = await serviceGet("wallet", `/entities/${wallet.entityId}`, { tenantId });
+  const asset = await serviceGet("wallet", `/assets/${payment.asset}`, { tenantId });
+  const counterparty = await serviceGet("compliance", `/counterparties/${payment.counterpartyId}`, { tenantId });
+  const provider = await serviceGet("operations", `/providers/${wallet.providerId}`, { tenantId });
+  const wallets = await serviceGet("wallet", "/wallets", { tenantId });
   return { wallet, wallets, entity, asset, counterparty, provider };
 }
 
-async function audit(actor, action, object, detail) {
-  return bestEffortPost("operations", "/audit", { actor, action, object, detail });
-}
-
-async function bestEffortPost(service, path, body) {
-  try {
-    return await servicePost(service, path, body);
-  } catch (error) {
-    console.error(JSON.stringify({
-      at: new Date().toISOString(),
-      event: "side_effect_failed",
-      service,
-      path,
-      message: error.message
-    }));
+async function transitionInTx(client, id, fromStatus, patch, tenantId = DEFAULT_TENANT_ID) {
+  const { rows } = await client.query(
+    "SELECT status FROM payment.payments WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
+    [id, tenantId]
+  );
+  if (!rows[0] || rows[0].status !== fromStatus) {
     return null;
   }
-}
-
-// Guarded transition: only writes if the row is still in fromStatus at the moment the lock is
-// acquired, so a caller that read a stale status before an await can't clobber a state another
-// concurrent call already moved past. Returns null (not the row) when the guard didn't match, so
-// callers can distinguish "I made this transition" from "someone already did."
-async function transitionIfStatus(id, fromStatus, patch) {
-  return withTransaction(DB, async (client) => {
-    const { rows } = await client.query("SELECT status FROM payment.payments WHERE id = $1 AND tenant_id = $2 FOR UPDATE", [
-      id,
-      DEFAULT_TENANT_ID
-    ]);
-    if (!rows[0] || rows[0].status !== fromStatus) {
-      return null;
-    }
-    const sets = [];
-    const values = [];
-    let i = 1;
-    for (const [column, value] of Object.entries(patch)) {
-      sets.push(`${toColumn(column)} = $${i}`);
-      values.push(value);
-      i += 1;
-    }
-    values.push(id, DEFAULT_TENANT_ID);
-    const { rows: updatedRows } = await client.query(
-      `UPDATE payment.payments SET ${sets.join(", ")} WHERE id = $${i} AND tenant_id = $${i + 1} RETURNING *`,
-      values
-    );
-    return fromRow(updatedRows[0]);
-  });
+  const sets = [];
+  const values = [];
+  let i = 1;
+  for (const [column, value] of Object.entries(patch)) {
+    sets.push(`${toColumn(column)} = $${i}`);
+    values.push(value);
+    i += 1;
+  }
+  values.push(id, tenantId);
+  const { rows: updatedRows } = await client.query(
+    `UPDATE payment.payments SET ${sets.join(", ")} WHERE id = $${i} AND tenant_id = $${i + 1} RETURNING *`,
+    values
+  );
+  return fromRow(updatedRows[0]);
 }
 
 function toColumn(field) {
   return field.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
 }
 
-async function insertPayment(payment) {
-  await query(
-    DB,
+async function findOpenExecutionJobInTx(client, paymentId, tenantId = DEFAULT_TENANT_ID) {
+  const { rows } = await client.query(
+    `SELECT *
+       FROM platform.jobs
+      WHERE tenant_id = $1
+        AND type = 'execute-payment'
+        AND payload->>'paymentId' = $2
+        AND status IN ('pending', 'running', 'failed')
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [tenantId, paymentId]
+  );
+  return rows[0] || null;
+}
+
+async function insertPaymentInTx(client, payment, tenantId = DEFAULT_TENANT_ID) {
+  payment.reference = await allocateReference(client);
+  await client.query(
     `INSERT INTO payment.payments
        (id, tenant_id, reference, type, source_wallet_id, counterparty_id, asset, amount, fee, status, approvals, required_approvals, screen_result, provider_ref, chain_ref, memo, created_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
     [
       payment.id,
-      DEFAULT_TENANT_ID,
+      tenantId,
       payment.reference,
       payment.type,
       payment.sourceWalletId,
@@ -389,17 +465,62 @@ function fromRow(row) {
   };
 }
 
-async function listPayments() {
-  const { rows } = await query(DB, "SELECT * FROM payment.payments WHERE tenant_id = $1 ORDER BY created_at DESC", [DEFAULT_TENANT_ID]);
+async function listPayments(tenantId = DEFAULT_TENANT_ID) {
+  const { rows } = await query(DB, "SELECT * FROM payment.payments WHERE tenant_id = $1 ORDER BY created_at DESC", [tenantId]);
   return rows.map(fromRow);
 }
 
-async function findPayment(id) {
-  const { rows } = await query(DB, "SELECT * FROM payment.payments WHERE id = $1 AND tenant_id = $2", [id, DEFAULT_TENANT_ID]);
+async function findPayment(id, tenantId = DEFAULT_TENANT_ID) {
+  const { rows } = await query(DB, "SELECT * FROM payment.payments WHERE id = $1 AND tenant_id = $2", [id, tenantId]);
   if (!rows[0]) {
     throw httpError(404, `payment ${id} not found`, "not_found");
   }
   return fromRow(rows[0]);
+}
+
+async function fetchAttempts(paymentId, tenantId = DEFAULT_TENANT_ID) {
+  const { rows } = await query(
+    DB,
+    "SELECT * FROM payment.payment_execution_attempts WHERE payment_id = $1 AND tenant_id = $2 ORDER BY at",
+    [paymentId, tenantId]
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    step: r.step,
+    outcome: r.outcome,
+    error: r.error,
+    at: r.at instanceof Date ? r.at.toISOString() : r.at
+  }));
+}
+
+async function fetchJobsForPayment(paymentId, tenantId = DEFAULT_TENANT_ID) {
+  const { rows } = await query(
+    DB,
+    `SELECT id, type, status, attempts, max_attempts, last_error, created_at, completed_at
+     FROM platform.jobs
+     WHERE tenant_id = $1
+       AND payload->>'paymentId' = $2
+     ORDER BY created_at DESC`,
+    [tenantId, paymentId]
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    type: r.type,
+    status: r.status,
+    attempts: r.attempts,
+    maxAttempts: r.max_attempts,
+    lastError: r.last_error,
+    createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : r.created_at,
+    completedAt: r.completed_at ? (r.completed_at instanceof Date ? r.completed_at.toISOString() : r.completed_at) : null
+  }));
+}
+
+async function listExecutionAttempts(paymentId, tenantId = DEFAULT_TENANT_ID) {
+  return fetchAttempts(paymentId, tenantId);
+}
+
+function withTenant(events, tenantId) {
+  return events.map((event) => ({ ...event, tenantId }));
 }
 
 async function bootstrap() {

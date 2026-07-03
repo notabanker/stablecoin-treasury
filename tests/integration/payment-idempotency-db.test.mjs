@@ -53,6 +53,9 @@ test("DB-backed idempotency: reserve/complete/release lifecycle", async () => {
     const first = await reserveIdempotencyKey("create", "key-1", hash);
     assert.equal(first.outcome, "reserved");
 
+    const pending = await reserveIdempotencyKey("create", "key-1", hash);
+    assert.equal(pending.outcome, "pending");
+
     const differentHash = hashRequest({ amount: 999 });
     const mismatch = await reserveIdempotencyKey("create", "key-1", differentHash);
     assert.equal(mismatch.outcome, "hash_mismatch");
@@ -74,7 +77,9 @@ test("DB-backed idempotency: concurrent reservations on the same key serialize i
     const hash = hashRequest({ amount: 42 });
     const results = await Promise.all(Array.from({ length: 15 }, () => reserveIdempotencyKey("create", "race-key", hash)));
     const reservedCount = results.filter((r) => r.outcome === "reserved").length;
+    const pendingCount = results.filter((r) => r.outcome === "pending").length;
     assert.equal(reservedCount, 1, "exactly one caller should win the reservation");
+    assert.equal(pendingCount, 14, "losing callers should see the in-progress reservation");
   });
 });
 

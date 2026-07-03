@@ -8,7 +8,18 @@ export async function reseedWallets() {
   await withTransaction("wallet", async (client) => {
     // Order matters: wallets FKs to legal_entities and assets; ledger_accounts FKs to wallets;
     // ledger_entries FKs to ledger_accounts and ledger_transactions.
-    await client.query("DELETE FROM wallet.ledger_entries");
+    await client.query(
+      `DELETE FROM wallet.ledger_entries le
+       WHERE EXISTS (
+         SELECT 1 FROM wallet.ledger_transactions lt
+         WHERE lt.id = le.transaction_id AND lt.tenant_id = $1
+       )
+       OR EXISTS (
+         SELECT 1 FROM wallet.ledger_accounts la
+         WHERE la.id = le.account_id AND la.tenant_id = $1
+       )`,
+      [DEFAULT_TENANT_ID]
+    );
     await client.query("DELETE FROM wallet.ledger_transactions WHERE tenant_id = $1", [DEFAULT_TENANT_ID]);
     await client.query("DELETE FROM wallet.ledger_accounts WHERE tenant_id = $1", [DEFAULT_TENANT_ID]);
     await client.query("DELETE FROM wallet.wallets WHERE tenant_id = $1", [DEFAULT_TENANT_ID]);

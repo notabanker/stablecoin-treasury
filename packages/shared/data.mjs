@@ -1,6 +1,8 @@
 export const ratesToEur = {
   EURC: 1,
   EURI: 1,
+  "N-EURC": 1,
+  "N-USDC": 0.92,
   USDC: 0.92,
   USDG: 0.92
 };

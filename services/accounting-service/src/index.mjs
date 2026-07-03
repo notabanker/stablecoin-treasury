@@ -1,33 +1,37 @@
 import { query, withTransaction } from "../../../packages/shared/db.mjs";
 import { createJsonService, httpError, ok, route } from "../../../packages/shared/http.mjs";
-import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
+import { DEFAULT_TENANT_ID, tenantIdFromHeaders } from "../../../packages/shared/tenant.mjs";
+import { validateProductionConfig } from "../../../packages/shared/config.mjs";
 import { assertBalanced, createPaymentJournals } from "./journals.mjs";
 import { reseedJournals } from "./seed.mjs";
 
 const port = Number(process.env.PORT || 4105);
 const DB = "accounting";
 
+validateProductionConfig("accounting-service");
 await bootstrap();
 
 createJsonService({
   name: "accounting-service",
   port,
+  internalAuthRequired: true,
   routes: [
-    route("GET", "/health", () => ok({ status: "ok", service: "accounting-service" })),
+    route("GET", "/health", () => ok({ status: "ok", service: "accounting-service" }), { public: true }),
     route("GET", "/ready", async () => {
       await query(DB, "SELECT 1");
       return ok({ status: "ready" });
-    }),
+    }, { public: true }),
     route("POST", "/reset", async () => {
       await reseedJournals();
       return ok(await listJournals());
     }),
-    route("GET", "/journals", async () => ok(await listJournals())),
-    route("POST", "/journals/from-payment", async ({ body }) => {
+    route("GET", "/journals", async ({ headers }) => ok(await listJournals(tenantIdFromHeaders(headers)))),
+    route("POST", "/journals/from-payment", async ({ body, headers }) => {
+      const tenantId = tenantIdFromHeaders(headers);
       if (!body.payment || !body.entity || !body.asset) {
         throw httpError(422, "Payment, entity, and asset are required", "missing_context");
       }
-      const { rows: existing } = await query(DB, "SELECT * FROM accounting.journal_entries WHERE payment_id = $1", [body.payment.id]);
+      const { rows: existing } = await query(DB, "SELECT * FROM accounting.journal_entries WHERE tenant_id = $1 AND payment_id = $2", [tenantId, body.payment.id]);
       if (existing.length) {
         return ok(existing.map(toApiShape));
       }
@@ -42,7 +46,7 @@ createJsonService({
             await client.query(
               `INSERT INTO accounting.journal_entries (id, tenant_id, date, entity_id, payment_id, account, debit, credit, currency, status)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-              [entry.id, DEFAULT_TENANT_ID, entry.date, entry.entityId, entry.paymentId, entry.account, entry.debit, entry.credit, entry.currency, entry.status]
+              [entry.id, tenantId, entry.date, entry.entityId, entry.paymentId, entry.account, entry.debit, entry.credit, entry.currency, entry.status]
             );
           }
         });
@@ -51,18 +55,19 @@ createJsonService({
         // call already inserted this payment's batch between our existence check and our insert.
         // Treat it the same as finding the existing rows up front.
         if (error.code === "23505") {
-          const { rows: raced } = await query(DB, "SELECT * FROM accounting.journal_entries WHERE payment_id = $1", [body.payment.id]);
+          const { rows: raced } = await query(DB, "SELECT * FROM accounting.journal_entries WHERE tenant_id = $1 AND payment_id = $2", [tenantId, body.payment.id]);
           return ok(raced.map(toApiShape));
         }
         throw error;
       }
       return ok(entries);
     }),
-    route("POST", "/journals/export", async () => {
+    route("POST", "/journals/export", async ({ headers }) => {
+      const tenantId = tenantIdFromHeaders(headers);
       await query(DB, "UPDATE accounting.journal_entries SET status = 'Exported' WHERE tenant_id = $1 AND status = 'Ready'", [
-        DEFAULT_TENANT_ID
+        tenantId
       ]);
-      return ok(await listJournals());
+      return ok(await listJournals(tenantId));
     })
   ]
 });
@@ -81,9 +86,9 @@ function toApiShape(row) {
   };
 }
 
-async function listJournals() {
+async function listJournals(tenantId = DEFAULT_TENANT_ID) {
   const { rows } = await query(DB, "SELECT * FROM accounting.journal_entries WHERE tenant_id = $1 ORDER BY created_at DESC", [
-    DEFAULT_TENANT_ID
+    tenantId
   ]);
   return rows.map(toApiShape);
 }

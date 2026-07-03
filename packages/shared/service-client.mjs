@@ -13,10 +13,10 @@ const defaultRetries = Number(process.env.SERVICE_RETRIES || 2);
 
 // Options that configure this client's own behavior, not fetch() -- must never be spread into
 // the fetch init object.
-const CLIENT_ONLY_OPTION_KEYS = ["retryable", "idempotencyKey", "timeoutMs", "requestId"];
+const CLIENT_ONLY_OPTION_KEYS = ["retryable", "idempotencyKey", "tenantId", "timeoutMs", "requestId"];
 
-export async function serviceGet(service, path) {
-  return serviceRequest(service, path, { method: "GET", retryable: true });
+export async function serviceGet(service, path, options = {}) {
+  return serviceRequest(service, path, { method: "GET", retryable: true, ...options });
 }
 
 export async function servicePost(service, path, body = {}, options = {}) {
@@ -37,6 +37,17 @@ export async function serviceRequest(service, path, options) {
   const fetchInit = fetchInitFrom(options);
   let lastError;
 
+  // Internal service auth: sign every outgoing call with the shared internal token.
+  // This is a simple HMAC over (path, body) — services validate it via http.mjs middleware.
+  const internalToken = process.env.INTERNAL_SERVICE_TOKEN;
+  let internalSig = {};
+  if (internalToken) {
+    const { createHmac } = await import("node:crypto");
+    const payload = `${options.method || "GET"}|${path}|${fetchInit.body || "{}"}`;
+    const sig = createHmac("sha256", internalToken).update(payload).digest("hex");
+    internalSig = { "X-Internal-Signature": sig };
+  }
+
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const controller = new AbortController();
     let timedOut = false;
@@ -51,6 +62,8 @@ export async function serviceRequest(service, path, options) {
         headers: {
           "X-Request-Id": options.requestId || Math.random().toString(36).slice(2, 12),
           ...(options.idempotencyKey ? { "Idempotency-Key": options.idempotencyKey } : {}),
+          ...(options.tenantId ? { "X-Tenant-Id": options.tenantId } : {}),
+          ...internalSig,
           ...(options.headers || {})
         }
       });
@@ -98,8 +111,7 @@ export async function serviceRequest(service, path, options) {
       return data;
     } catch (error) {
       clearTimeout(timeout);
-      if (timedOut) error.name = "AbortError";
-      lastError = normalizeError(service, error);
+      lastError = normalizeError(service, error, timedOut);
       if (!options.retryable || attempt >= attempts || !isRetryableError(lastError)) {
         throw lastError;
       }
@@ -136,9 +148,10 @@ function isRetryableError(error) {
   return error.name === "AbortError" || shouldRetry(error.status);
 }
 
-function normalizeError(service, error) {
-  if (error.name === "AbortError") {
+function normalizeError(service, error, timedOut = false) {
+  if (timedOut || error.name === "AbortError") {
     const timeout = new Error(`${service} request timed out`);
+    timeout.name = "AbortError";
     timeout.status = 504;
     timeout.body = { error: "upstream_timeout", service };
     return timeout;

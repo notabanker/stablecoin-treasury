@@ -1,7 +1,7 @@
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { extname, join, normalize, sep } from "node:path";
 import { createServer } from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHmac, timingSafeEqual } from "node:crypto";
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
@@ -11,7 +11,48 @@ const contentTypes = {
   ".svg": "image/svg+xml"
 };
 
-export function createJsonService({ name, port, routes, staticRoot }) {
+// Rate limiter: simple sliding-window counters per IP keyed by (ip, pathPrefix).
+// In production this would be a Redis-backed distributed counter; for single-process
+// services an in-memory Map per service instance is correct because each service
+// only serves one port and all requests to that port go through this code path.
+const RATE_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 1000);
+const RATE_MAX = Number(process.env.RATE_LIMIT_MAX || 200);
+const STATE_RATE_MAX = Number(process.env.STATE_RATE_LIMIT_MAX || 50);
+const rateBuckets = new Map();
+let rateCleanupTimer = null;
+
+function checkRateLimit(req, now, windowMs, limit, bucketKey) {
+  const ip = req.socket?.remoteAddress || "127.0.0.1";
+  const key = `${bucketKey}:${ip}`;
+  let bucket = rateBuckets.get(key);
+  if (!bucket || bucket.resetAt <= now) {
+    bucket = { tokens: limit, resetAt: now + windowMs };
+    rateBuckets.set(key, bucket);
+    startRateCleanup();
+  }
+  if (bucket.tokens <= 0) {
+    return { allowed: false, retryAfterMs: Math.max(0, bucket.resetAt - now) };
+  }
+  bucket.tokens -= 1;
+  return { allowed: true, remaining: bucket.tokens };
+}
+
+function startRateCleanup() {
+  if (rateCleanupTimer) return;
+  rateCleanupTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [key, bucket] of rateBuckets) {
+      if (bucket.resetAt <= now) rateBuckets.delete(key);
+    }
+    if (rateBuckets.size === 0) {
+      clearInterval(rateCleanupTimer);
+      rateCleanupTimer = null;
+    }
+  }, Math.max(RATE_WINDOW_MS, 10000));
+  rateCleanupTimer.unref();
+}
+
+export function createJsonService({ name, port, routes, staticRoot, internalAuthRequired = false }) {
   const host = process.env.HOST || "127.0.0.1";
   const metrics = createMetrics(name);
   let draining = false;
@@ -40,7 +81,26 @@ export function createJsonService({ name, port, routes, staticRoot }) {
         return;
       }
 
-      const route = matchRoute(routes, req.method, url.pathname);
+      // Rate limiting: separate buckets for state reads vs general routes.
+      const isStateRoute = url.pathname === "/api/state";
+      const bucketKey = isStateRoute ? "state" : "general";
+      const rateLimit = isStateRoute
+        ? STATE_RATE_MAX
+        : RATE_MAX;
+      const rateResult = checkRateLimit(req, Date.now(), RATE_WINDOW_MS, rateLimit, bucketKey);
+      if (!rateResult.allowed) {
+        res.setHeader("Retry-After", Math.ceil(rateResult.retryAfterMs / 1000));
+        sendJson(res, 429, {
+          error: "rate_limited",
+          message: "Too many requests",
+          retryAfterMs: rateResult.retryAfterMs
+        });
+        metrics.record(429, Date.now() - started);
+        logRequest(name, req.method, url.pathname, 429, Date.now() - started, requestId);
+        return;
+      }
+
+      const route = matchRoute(internalRoutes, req.method, url.pathname);
 
       if (route) {
         const body = await readJson(req);
@@ -51,9 +111,14 @@ export function createJsonService({ name, port, routes, staticRoot }) {
           params: route.params,
           query: Object.fromEntries(url.searchParams),
           requestId,
-          url
+          url,
+          clientIp: getClientIp(req)
         };
         const result = await route.handler(context);
+        // Route handlers can set cookies by returning a `cookies` array of Set-Cookie strings.
+        if (result?.cookies?.length) {
+          res.setHeader("Set-Cookie", [...result.cookies]);
+        }
         sendJson(res, result?.status || 200, result?.body ?? result);
         metrics.record(result?.status || 200, Date.now() - started);
         logRequest(name, req.method, url.pathname, result?.status || 200, Date.now() - started, requestId);
@@ -87,6 +152,24 @@ export function createJsonService({ name, port, routes, staticRoot }) {
   });
   // headersTimeout must stay below requestTimeout: headers are a prefix of the whole request,
   // so they must always arrive first and faster.
+  // Proxy-aware client IP extraction: use socket address by default.
+  // Set TRUST_PROXY_HEADERS=true to honor X-Forwarded-For from trusted proxies.
+  function getClientIp(req) {
+    const trustProxy = process.env.TRUST_PROXY_HEADERS === "true";
+    if (trustProxy && req.headers["x-forwarded-for"]) {
+      // X-Forwarded-For: client, proxy1, proxy2 — take the leftmost (original client)
+      const fwd = req.headers["x-forwarded-for"].split(",")[0].trim();
+      // Normalize IPv4-mapped IPv6
+      return fwd.startsWith("::ffff:") ? fwd.slice(7) : fwd;
+    }
+    const remote = req.socket?.remoteAddress || "127.0.0.1";
+    return remote.startsWith("::ffff:") ? remote.slice(7) : remote;
+  }
+
+  const internalRoutes = internalAuthRequired && INTERNAL_AUTH_REQUIRED
+    ? routes.map((rt) => rt.public ? rt : { ...rt, handler: validateInternalAuth(rt.handler) })
+    : routes;
+
   server.headersTimeout = Number(process.env.HTTP_HEADERS_TIMEOUT_MS || 8000);
   server.requestTimeout = Number(process.env.HTTP_REQUEST_TIMEOUT_MS || 30000);
 
@@ -109,8 +192,8 @@ export function createJsonService({ name, port, routes, staticRoot }) {
   return server;
 }
 
-export function route(method, pattern, handler) {
-  return { method, pattern, handler };
+export function route(method, pattern, handler, opts = {}) {
+  return { method, pattern, handler, public: opts.public === true };
 }
 
 export function ok(body) {
@@ -122,6 +205,42 @@ export function httpError(status, message, code) {
   error.status = status;
   error.code = code;
   return error;
+}
+
+// Internal service authentication. When INTERNAL_AUTH_REQUIRED=true, services validate
+// a shared secret via HMAC over (method + path + body). Gateway, relay, and job-worker
+// sign their outgoing requests with the same secret and same payload shape.
+// Keep local dev ergonomic: defaults to off.
+const INTERNAL_SERVICE_TOKEN = process.env.INTERNAL_SERVICE_TOKEN || "dev-internal-token";
+const INTERNAL_AUTH_REQUIRED = process.env.INTERNAL_AUTH_REQUIRED === "true";
+
+export function signInternalRequest(method, path, body) {
+  const payload = `${method}|${path}|${JSON.stringify(body || {})}`;
+  const signature = createHmac("sha256", INTERNAL_SERVICE_TOKEN).update(payload).digest("hex");
+  return { "X-Internal-Signature": signature };
+}
+
+function verifyInternalRequest(method, path, body, signature) {
+  const payload = `${method}|${path}|${JSON.stringify(body || {})}`;
+  const expected = createHmac("sha256", INTERNAL_SERVICE_TOKEN).update(payload).digest("hex");
+  const expectedBuf = Buffer.from(expected, "hex");
+  const providedBuf = Buffer.from(String(signature || ""), "hex");
+  return expectedBuf.length === providedBuf.length && timingSafeEqual(expectedBuf, providedBuf);
+}
+
+export function validateInternalAuth(routeHandler, opts = {}) {
+  return async (context) => {
+    if (!INTERNAL_AUTH_REQUIRED) return routeHandler(context);
+    if (opts.public) return routeHandler(context);
+
+    const sig = context.headers["x-internal-signature"] || "";
+    const method = context.method || "GET";
+    const path = context.url?.pathname || "/";
+    if (!verifyInternalRequest(method, path, context.body, sig)) {
+      throw httpError(401, "Internal authentication required", "internal_auth_required");
+    }
+    return routeHandler(context);
+  };
 }
 
 async function readJson(req) {
@@ -227,9 +346,6 @@ function sendJson(res, status, body) {
 }
 
 function setBaseHeaders(res, requestId) {
-  // No Access-Control-Allow-Origin by default: same-origin requests (the browser app is served
-  // by this same gateway) never need it, and omitting it means cross-origin browser requests
-  // are blocked by same-origin policy unless an operator explicitly opts in via CORS_ORIGIN.
   const corsOrigin = process.env.CORS_ORIGIN;
   if (corsOrigin) {
     res.setHeader("Access-Control-Allow-Origin", corsOrigin);
@@ -240,6 +356,9 @@ function setBaseHeaders(res, requestId) {
   res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Request-Id", requestId);
+  // Trace propagation: pass the request-id as the trace-id for simplicity.
+  // A production OTel SDK would replace this with proper traceparent header handling.
+  res.setHeader("X-Trace-Id", requestId);
 }
 
 function logRequest(name, method, path, status, durationMs, requestId) {

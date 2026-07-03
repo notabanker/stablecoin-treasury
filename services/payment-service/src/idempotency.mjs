@@ -24,53 +24,57 @@ function sortKeys(value) {
 
 // Reserve via INSERT ... ON CONFLICT DO NOTHING against the (tenant, key, action) primary key.
 // Under Postgres's default READ COMMITTED isolation, a second call racing on the same key
-// blocks on this INSERT until the first transaction commits or rolls back -- so by the time this
-// function's conflict branch runs, the other attempt's outcome is already durable. There is no
-// "in progress" state visible to a caller the way there was with the M0 in-process JS lock: the
-// database serializes the two attempts for us.
-export async function reserveIdempotencyKey(action, idempotencyKey, requestHash) {
+// blocks on this INSERT until the first reservation commits or rolls back. The payment creation
+// itself happens after the reservation, so another caller can legitimately observe status='pending'
+// before payment_id is populated; that must be surfaced as an in-progress retry signal, not treated
+// as a completed reservation with a NULL payment id.
+export async function reserveIdempotencyKey(action, idempotencyKey, requestHash, tenantId = DEFAULT_TENANT_ID) {
   return withTransaction(DB, async (client) => {
     const inserted = await client.query(
       `INSERT INTO payment.idempotency_keys (tenant_id, idempotency_key, action, request_hash, status)
        VALUES ($1, $2, $3, $4, 'pending')
        ON CONFLICT (tenant_id, idempotency_key, action) DO NOTHING
        RETURNING *`,
-      [DEFAULT_TENANT_ID, idempotencyKey, action, requestHash]
+      [tenantId, idempotencyKey, action, requestHash]
     );
     if (inserted.rows.length > 0) {
       return { outcome: "reserved" };
     }
     const { rows } = await client.query(
       "SELECT * FROM payment.idempotency_keys WHERE tenant_id = $1 AND idempotency_key = $2 AND action = $3",
-      [DEFAULT_TENANT_ID, idempotencyKey, action]
+      [tenantId, idempotencyKey, action]
     );
     const existing = rows[0];
     if (existing.request_hash !== requestHash) {
       return { outcome: "hash_mismatch" };
     }
+    if (existing.status === "pending" || !existing.payment_id) {
+      return { outcome: "pending" };
+    }
     return { outcome: "done", paymentId: existing.payment_id };
   });
 }
 
-export async function completeIdempotencyKey(action, idempotencyKey, paymentId) {
+export async function completeIdempotencyKey(action, idempotencyKey, paymentId, client, tenantId = DEFAULT_TENANT_ID) {
   if (!idempotencyKey) return;
-  await query(
-    DB,
+  const q = client || { query: (...args) => query(DB, ...args) };
+  await q.query(
     "UPDATE payment.idempotency_keys SET status = 'done', payment_id = $1 WHERE tenant_id = $2 AND idempotency_key = $3 AND action = $4",
-    [paymentId, DEFAULT_TENANT_ID, idempotencyKey, action]
+    [paymentId, tenantId, idempotencyKey, action]
   );
 }
 
-export async function releaseIdempotencyKey(action, idempotencyKey) {
+export async function releaseIdempotencyKey(action, idempotencyKey, tenantId = DEFAULT_TENANT_ID) {
   if (!idempotencyKey) return;
   await query(DB, "DELETE FROM payment.idempotency_keys WHERE tenant_id = $1 AND idempotency_key = $2 AND action = $3", [
-    DEFAULT_TENANT_ID,
+    tenantId,
     idempotencyKey,
     action
   ]);
 }
 
-export async function allocateReference() {
-  const { rows } = await query(DB, "SELECT nextval('payment.payment_reference_seq') AS n");
+export async function allocateReference(client) {
+  const q = client || { query: (...args) => query(DB, ...args) };
+  const { rows } = await q.query("SELECT nextval('payment.payment_reference_seq') AS n");
   return `PMT-${rows[0].n}`;
 }

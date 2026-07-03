@@ -19,11 +19,19 @@ test("N concurrent creates with the same Idempotency-Key produce exactly one pay
   const key = "concurrent-same-key";
   const body = JSON.stringify({ amount: 1000, counterpartyId: "cp-nordic", sourceWalletId: "wal-de-eur", type: "Supplier" });
   const results = await Promise.all(
-    Array.from({ length: 20 }, () => api(stack.baseUrl, "/payments", { method: "POST", headers: { "Idempotency-Key": key }, body }))
+    Array.from({ length: 50 }, () => api(stack.baseUrl, "/payments", { method: "POST", headers: { "Idempotency-Key": key }, body }))
   );
 
   const succeeded = results.filter((r) => r.status === 200);
   assert.ok(succeeded.length >= 1, "at least one request must succeed");
+  assert.equal(results.filter((r) => r.status === 404).length, 0, "same-key races must not return spurious 404s");
+  assert.ok(
+    results.every((r) => r.status === 200 || r.status === 409),
+    `expected only 200 or idempotency-in-progress 409, got ${results.map((r) => r.status).join(", ")}`
+  );
+  for (const pending of results.filter((r) => r.status === 409)) {
+    assert.equal(pending.data.error, "idempotency_in_progress");
+  }
   const paymentIds = new Set(succeeded.map((r) => r.data.payment.id));
   assert.equal(paymentIds.size, 1, `expected exactly one distinct payment id, got ${paymentIds.size}`);
 
@@ -65,11 +73,17 @@ test("concurrent execute calls on the same payment cannot double-debit the walle
 
   const walletBefore = (await api(stack.baseUrl, "/state")).data.wallets.find((w) => w.id === "wal-de-eur");
 
+  // Fire concurrent execute calls. With the async saga, they'll return Accepted (status still
+  // Executing), but only one saga job is enqueued because the payment-service's transitionInTx
+  // uses FOR UPDATE — the first call wins, subsequent calls see it's already past "Approved".
   const results = await Promise.all(
     Array.from({ length: 10 }, () => api(stack.baseUrl, `/payments/${create.data.payment.id}/execute`, { method: "POST" }))
   );
-  const settled = results.filter((r) => r.status === 200 && r.data.payment.status === "Settled");
-  assert.ok(settled.length >= 1);
+  const accepted = results.filter((r) => r.status === 200);
+  assert.ok(accepted.length >= 1, "at least one execute call should be accepted");
+
+  // Wait for the saga to settle
+  await waitForSettlement(stack.baseUrl, create.data.payment.id);
 
   const walletAfter = (await api(stack.baseUrl, "/state")).data.wallets.find((w) => w.id === "wal-de-eur");
   const debited = roundTo2(walletBefore.balance - walletAfter.balance);
@@ -104,4 +118,21 @@ test("concurrent approvals cannot push a two-approval payment's count past its r
 
 function roundTo2(value) {
   return Math.round(value * 100) / 100;
+}
+
+async function waitForSettlement(baseUrl, paymentId, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = await api(baseUrl, "/state");
+    const payment = state.data.payments?.find((p) => p.id === paymentId);
+    if (payment && (payment.status === "Settled" || payment.status === "Failed" || payment.status === "Blocked")) {
+      return state;
+    }
+    await sleep(200);
+  }
+  throw new Error(`Payment ${paymentId} did not settle within ${timeoutMs}ms`);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

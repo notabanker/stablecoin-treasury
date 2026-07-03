@@ -90,15 +90,26 @@ if (created.payment.id !== replayed.payment.id) {
 
 await req(`/payments/${created.payment.id}/approve`, { method: "POST" });
 const executed = await req(`/payments/${created.payment.id}/execute`, { method: "POST" });
-const state = executed.state;
-const payment = state.payments.find((item) => item.id === created.payment.id);
+// Execution is now async (saga picks up the job and settles). Poll for settlement.
+if (!executed.accepted) {
+  throw new Error(`Execute should be accepted, got ${JSON.stringify(executed)}`);
+}
+
+let payment;
+let state;
+for (let i = 0; i < 50; i++) {
+  state = await req("/state");
+  payment = state.payments.find((item) => item.id === created.payment.id);
+  if (payment && (payment.status === "Settled" || payment.status === "Failed")) break;
+  await new Promise((r) => setTimeout(r, 200));
+}
+if (payment.status !== "Settled") {
+  throw new Error(`Expected settled payment after saga, got ${payment.status}`);
+}
+
 const wallet = state.wallets.find((item) => item.id === "wal-hold-eur");
 const journalLines = state.journalEntries.filter((entry) => entry.paymentId === created.payment.id);
 const reconRows = state.reconciliation.filter((entry) => entry.paymentId === created.payment.id);
-
-if (payment.status !== "Settled") {
-  throw new Error(`Expected settled payment, got ${payment.status}`);
-}
 if (journalLines.length !== 3) {
   throw new Error(`Expected 3 journal lines, got ${journalLines.length}`);
 }

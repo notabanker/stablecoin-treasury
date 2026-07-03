@@ -11,7 +11,9 @@ const state = {
     paymentStatus: "All"
   },
   refreshFailedAt: null,
+  needsLogin: false,
   selectedPaymentId: "",
+  sessionToken: "",
   showPaymentForm: false,
   toast: null
 };
@@ -21,6 +23,7 @@ const views = [
   ["payments", "Payments"],
   ["wallets", "Wallets"],
   ["controls", "Controls"],
+  ["repair", "Repair"],
   ["reconciliation", "Reconciliation"],
   ["operations", "Operations"]
 ];
@@ -46,6 +49,10 @@ const statusClasses = {
   Resolved: "status-clear",
   Review: "status-warning",
   Settled: "status-clear"
+  ,
+  error: "status-blocked",
+  started: "status-warning",
+  success: "status-clear"
 };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -69,6 +76,11 @@ function bindEvents() {
 
     if (action === "refresh") {
       await loadState("Refreshing desk");
+      return;
+    }
+
+    if (action === "logout") {
+      await logout();
       return;
     }
 
@@ -96,7 +108,7 @@ function bindEvents() {
       "approve-payment": () => post(`/payments/${id}/approve`, {}, "Payment approved"),
       "cancel-payment": () => post(`/payments/${id}/cancel`, {}, "Payment cancelled"),
       "execute-payment": () => post(`/payments/${id}/execute`, {}, "Payment executed"),
-      "retry-execution": () => post(`/payments/${id}/execute`, {}, "Execution retried"),
+      "retry-execution": () => post(`/repair/${id}/retry`, {}, "Execution retried"),
       "resolve-recon": () => post(`/reconciliation/${id}/resolve`, {}, "Exception resolved"),
       "simulate-recon": () => post("/reconciliation/exceptions/simulate", {}, "Exception created"),
       "export-accounting": () => post("/accounting/export", {}, "Journal batch exported"),
@@ -119,6 +131,12 @@ function bindEvents() {
     const form = event.target;
     if (!form.matches("[data-form]")) return;
     event.preventDefault();
+
+    if (form.dataset.form === "login") {
+      const formData = new FormData(form);
+      await login(String(formData.get("email") || ""), String(formData.get("password") || ""));
+      return;
+    }
 
     if (form.dataset.form === "create-payment") {
       const formData = new FormData(form);
@@ -172,6 +190,12 @@ async function loadState(label = "Loading desk") {
     const data = await request("/state");
     receiveState(data);
   } catch (error) {
+    if (error.status === 401) {
+      state.data = null;
+      state.error = "";
+      state.needsLogin = true;
+      return;
+    }
     if (state.data) {
       // Data already on screen -- a failed refresh must not silently leave a stale-looking
       // dashboard. Surface it as a banner (persists until the next successful refresh) and a
@@ -183,6 +207,49 @@ async function loadState(label = "Loading desk") {
       state.error = readableError(error);
     }
   } finally {
+    state.busy = "";
+    render();
+  }
+}
+
+async function login(email, password) {
+  state.busy = "Signing in";
+  state.error = "";
+  render();
+  try {
+    const result = await request("/login", {
+      body: JSON.stringify({ email, password }),
+      method: "POST"
+    }, { skipAuth: true });
+    // Session is now stored in an HttpOnly cookie set by the server.
+    // The response body includes the session info for display purposes.
+    state.sessionToken = result.session.token || "cookie-managed";
+    state.needsLogin = false;
+    showToast("Signed in", "success");
+    await loadState("Loading desk");
+  } catch (error) {
+    state.needsLogin = true;
+    state.error = readableError(error);
+  } finally {
+    state.busy = "";
+    render();
+  }
+}
+
+async function logout() {
+  state.busy = "Signing out";
+  render();
+  try {
+    if (state.sessionToken) {
+      await request("/logout", { method: "POST", body: "{}" });
+    }
+  } catch {
+    // Local logout must still clear the browser session if the server token has expired.
+  } finally {
+    state.sessionToken = "";
+    state.needsLogin = false;
+    state.data = null;
+    state.needsLogin = true;
     state.busy = "";
     render();
   }
@@ -209,9 +276,12 @@ async function post(path, body, successMessage, headers = {}) {
   }
 }
 
-async function request(path, options = {}) {
+async function request(path, options = {}, controls = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  // CSRF double-submit: read the token from the readable csrf cookie and send it as a header.
+  const csrfToken = document.cookie.split("; ").find((c) => c.startsWith("csrf="))?.split("=")[1] || "";
+  const isMutation = options.method && options.method !== "GET" && options.method !== "HEAD";
   let response;
   try {
     response = await fetch(`/api${path}`, {
@@ -219,6 +289,9 @@ async function request(path, options = {}) {
       signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
+        // Session token is now in an HttpOnly cookie (auto-sent by the browser).
+        // CSRF token is sent as a header for mutating requests.
+        ...(isMutation && csrfToken ? { "X-Csrf-Token": csrfToken } : {}),
         ...(options.headers || {})
       }
     });
@@ -234,7 +307,10 @@ async function request(path, options = {}) {
   const payload = text ? JSON.parse(text) : null;
   if (!response.ok) {
     const message = payload?.message || payload?.error || `${response.status} ${response.statusText}`;
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    error.code = payload?.error;
+    throw error;
   }
   return payload;
 }
@@ -242,11 +318,18 @@ async function request(path, options = {}) {
 function receiveState(data) {
   state.data = data;
   state.error = "";
+  state.needsLogin = false;
   state.refreshFailedAt = null;
   state.selectedPaymentId = state.selectedPaymentId || data.selectedPaymentId || data.payments?.[0]?.id || "";
 }
 
 function render() {
+  if (state.needsLogin) {
+    appEl.innerHTML = renderLogin();
+    renderToast();
+    return;
+  }
+
   if (!state.data && !state.error) {
     appEl.innerHTML = renderBoot();
     renderToast();
@@ -281,6 +364,34 @@ function render() {
     </section>
   `;
   renderToast();
+}
+
+function renderLogin() {
+  return `
+    <main class="login-shell">
+      <section class="login-panel">
+        <div class="brand-block login-brand">
+          <div class="brand-mark">VT</div>
+          <div>
+            <div class="brand-title">Vega Treasury</div>
+            <div class="brand-subtitle">Stablecoin Control</div>
+          </div>
+        </div>
+        <form class="login-form" data-form="login">
+          <label>
+            <span>Email</span>
+            <input name="email" type="email" autocomplete="username" required value="marta@vega-industries.com">
+          </label>
+          <label>
+            <span>Password</span>
+            <input name="password" type="password" autocomplete="current-password" required>
+          </label>
+          ${state.error ? `<div class="login-error" role="alert">${escapeHtml(state.error)}</div>` : ""}
+          <button class="btn primary" type="submit" ${state.busy ? "disabled" : ""}>Sign in</button>
+        </form>
+      </section>
+    </main>
+  `;
 }
 
 function renderBoot() {
@@ -343,9 +454,10 @@ function renderTopbar() {
       <div class="topbar-actions">
         ${state.busy ? `<span class="busy-chip">${escapeHtml(state.busy)}</span>` : ""}
         <span class="timestamp">${escapeHtml(formatDateTime(data.lastUpdated))}</span>
-        <span class="user-chip">${escapeHtml(data.currentUser.name)}</span>
+        <span class="user-chip">${escapeHtml(data.currentUser.name)}${data.currentUser.tenantId ? `<span>${escapeHtml(shortTenant(data.currentUser.tenantId))}</span>` : ""}</span>
         ${button("Refresh", "refresh", "", "secondary")}
         ${button("New payment", "new-payment", "", "primary")}
+        ${state.sessionToken ? button("Logout", "logout", "", "ghost") : ""}
       </div>
     </header>
     ${renderStaleBanner()}
@@ -370,6 +482,7 @@ function renderActiveView() {
   if (state.activeView === "payments") return renderPaymentsView();
   if (state.activeView === "wallets") return renderWalletsView();
   if (state.activeView === "controls") return renderControlsView();
+  if (state.activeView === "repair") return renderRepairView();
   if (state.activeView === "reconciliation") return renderReconciliationView();
   if (state.activeView === "operations") return renderOperationsView();
   return renderOverviewView();
@@ -437,7 +550,7 @@ function renderPaymentsView() {
         <form class="filter-form" data-form="payment-filter">
           <input name="paymentSearch" type="search" value="${escapeHtml(state.filters.paymentSearch)}" aria-label="Search payments">
           <select name="paymentStatus" aria-label="Payment status">
-            ${["All", "Pending approval", "Approved", "Settled", "Blocked", "Cancelled", "Failed"].map((status) => option(status, state.filters.paymentStatus)).join("")}
+            ${["All", "Pending approval", "Approved", "Executing", "Settled", "Blocked", "Cancelled", "Failed"].map((status) => option(status, state.filters.paymentStatus)).join("")}
           </select>
           <button class="btn secondary" type="submit">Filter</button>
         </form>
@@ -572,8 +685,8 @@ function renderPaymentActions(payment, compact) {
     // left off (wallet debit is idempotent) instead of leaving the payment stuck with no action.
     parts.push(button(compact ? "Retry" : "Retry execution", "retry-execution", payment.id, "primary"));
   }
-  if (payment.status === "Failed" && !compact) {
-    parts.push(`<span class="muted">Debit did not complete. This requires operator repair -- not yet available in this build.</span>`);
+  if (payment.status === "Failed") {
+    parts.push(button(compact ? "Retry" : "Retry execution", "retry-execution", payment.id, "primary"));
   }
   return parts.join("");
 }
@@ -828,6 +941,89 @@ function renderCounterpartyTable(counterparties) {
   `;
 }
 
+function renderRepairView() {
+  const repairItems = state.data.repair || [];
+  return `
+    <section class="metric-grid">
+      ${metricCard("Repair queue", String(repairItems.length), "Executing and failed")}
+      ${metricCard("Failed", String(repairItems.filter((item) => item.payment.status === "Failed").length), "Needs retry or review")}
+      ${metricCard("Executing", String(repairItems.filter((item) => item.payment.status === "Executing").length), "Saga in progress")}
+      ${metricCard("Errors", String(repairItems.filter((item) => latestAttempt(item)?.error).length), "Latest attempt")}
+      ${metricCard("Retries", String(repairItems.reduce((sum, item) => sum + item.attempts.filter((attempt) => attempt.outcome === "error").length, 0)), "Recorded failures")}
+    </section>
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <div class="section-kicker">Operator repair</div>
+          <h2>Queue</h2>
+        </div>
+        ${button("Refresh", "refresh", "", "secondary")}
+      </div>
+      ${renderRepairTable(repairItems)}
+    </section>
+  `;
+}
+
+function renderRepairTable(items) {
+  if (!items.length) return emptyState("No repairable payments");
+  return `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Payment</th>
+            <th>Status</th>
+            <th>Amount</th>
+            <th>Attempts</th>
+            <th>Last signal</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${items.map((item) => {
+            const payment = item.payment;
+            const last = latestAttempt(item);
+            return `
+              <tr>
+                <td><strong>${escapeHtml(payment.reference)}</strong><span class="muted-cell">${escapeHtml(formatDate(payment.createdAt))}</span></td>
+                <td>${badge(payment.status)}</td>
+                <td>${escapeHtml(token(payment.amount, payment.asset))}</td>
+                <td>${escapeHtml(String(item.attempts.length))}</td>
+                <td><strong>${escapeHtml(last?.step || "-")}</strong><span class="muted-cell">${escapeHtml(last?.error || last?.outcome || "No attempt recorded")}</span></td>
+                <td class="row-actions">${button("Retry", "retry-execution", payment.id, "primary")}</td>
+              </tr>
+            `;
+          }).join("")}
+        </tbody>
+      </table>
+    </div>
+    <div class="repair-attempts">
+      ${items.map((item) => renderAttemptTrail(item)).join("")}
+    </div>
+  `;
+}
+
+function renderAttemptTrail(item) {
+  const payment = item.payment;
+  return `
+    <article class="attempt-card">
+      <div>
+        <div class="card-title">${escapeHtml(payment.reference)}</div>
+        <div class="card-subtitle">${escapeHtml(payment.status)} / ${escapeHtml(item.attempts.length)} attempt rows</div>
+      </div>
+      <div class="attempt-list">
+        ${item.attempts.slice(-8).map((attempt) => `
+          <span>${escapeHtml(attempt.step)} ${badge(attempt.outcome)} ${attempt.error ? `<em>${escapeHtml(attempt.error)}</em>` : ""}</span>
+        `).join("") || `<span class="muted">No attempts yet</span>`}
+      </div>
+    </article>
+  `;
+}
+
+function latestAttempt(item) {
+  return item.attempts[item.attempts.length - 1] || null;
+}
+
 function renderReconciliationView() {
   const data = state.data;
   return `
@@ -1049,7 +1245,7 @@ function renderAuditList(audit) {
 function computeMetrics(data) {
   const totalEur = data.wallets.reduce((sum, wallet) => sum + walletValueEur(wallet), 0);
   const eurValue = data.wallets
-    .filter((wallet) => ["EURC", "EURI"].includes(wallet.asset))
+    .filter((wallet) => ["EURC", "EURI", "N-EURC"].includes(wallet.asset))
     .reduce((sum, wallet) => sum + walletValueEur(wallet), 0);
   return {
     blockedPayments: data.payments.filter((payment) => payment.status === "Blocked").length,
@@ -1186,6 +1382,10 @@ function formatDateTime(value) {
 
 function findById(items, id) {
   return items.find((item) => item.id === id);
+}
+
+function shortTenant(tenantId) {
+  return `tenant ${String(tenantId).slice(-4)}`;
 }
 
 function createIdempotencyKey() {

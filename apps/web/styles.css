@@ -463,6 +463,12 @@ tbody tr[data-action]:hover {
 .user-chip {
   background: #ffffff;
   border: 1px solid var(--line);
+  gap: 6px;
+}
+
+.user-chip span {
+  color: var(--muted);
+  font-size: 0.72rem;
 }
 
 .timestamp {
@@ -678,6 +684,42 @@ label span {
   margin-top: 5px;
 }
 
+.repair-attempts {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.attempt-card {
+  background: #f7faf8;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.attempt-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.attempt-list span {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  display: inline-flex;
+  gap: 6px;
+  padding: 6px 8px;
+}
+
+.attempt-list em {
+  color: var(--red);
+  font-style: normal;
+}
+
 .empty-state {
   align-items: center;
   background: #f7faf8;
@@ -691,7 +733,8 @@ label span {
 }
 
 .boot-panel,
-.service-error {
+.service-error,
+.login-shell {
   align-items: center;
   display: flex;
   justify-content: center;
@@ -716,6 +759,49 @@ label span {
   box-shadow: var(--shadow);
   max-width: 560px;
   padding: 26px;
+}
+
+.login-shell {
+  background: var(--bg);
+}
+
+.login-panel {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  display: grid;
+  gap: 22px;
+  max-width: 420px;
+  padding: 26px;
+  text-align: left;
+  width: min(420px, calc(100vw - 32px));
+}
+
+.login-brand {
+  color: var(--ink);
+}
+
+.login-brand .brand-subtitle {
+  color: var(--muted);
+}
+
+.login-form {
+  display: grid;
+  gap: 14px;
+}
+
+.login-form .btn {
+  width: 100%;
+}
+
+.login-error {
+  background: var(--red-bg);
+  border: 1px solid #efb6ad;
+  border-radius: 7px;
+  color: var(--red);
+  font-size: 0.86rem;
+  padding: 10px;
 }
 
 .toast-root {

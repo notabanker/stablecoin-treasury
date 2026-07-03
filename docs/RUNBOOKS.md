@@ -1,0 +1,154 @@
+# Operational Runbooks
+
+## Payment Stuck in Executing
+
+**Symptoms:** Payment status remains "Executing" for > 2 minutes. No saga completion.
+
+**Detection:**
+```sql
+SELECT id, reference, status, created_at
+FROM payment.payments
+WHERE status = 'Executing'
+  AND created_at < now() - INTERVAL '2 minutes';
+```
+
+**Safe remediation:**
+1. Check job status: `GET /api/repair` — look for the payment and its job state
+2. If job is dead-lettered: `POST /api/repair/:id/retry`
+3. If job is pending/running: wait for worker to pick it up
+4. If no job exists: `POST /api/repair/:id/retry` to enqueue a new one
+
+**Escalation:** If repair retry fails (503/500), check downstream services:
+```bash
+curl http://127.0.0.1:4101/health  # wallet
+curl http://127.0.0.1:4105/health  # accounting
+curl http://127.0.0.1:4106/health  # reconciliation
+```
+
+## Payment Failed
+
+**Symptoms:** Payment status is "Failed" but execution should have succeeded.
+
+**Detection:**
+```sql
+SELECT id, reference, status
+FROM payment.payments
+WHERE status = 'Failed';
+```
+
+**Safe remediation:**
+1. Check execution attempts: `GET /api/payments/:id/attempts`
+2. Check job error: see `last_error` in repair queue response
+3. If downstream service was temporarily down: retry via repair endpoint
+4. If debit failed due to insufficient balance: cancel payment, top up wallet, create new
+5. If policy blocked: check policy configuration
+
+**Escalation:** Never directly mutate `payment.payments.status` or `wallet.ledger_entries`. Always go through the service API.
+
+## Dead-Letter Job
+
+**Symptoms:** Job appears in dead-letter state. No automatic retry. Alert created.
+
+**Detection:**
+```sql
+SELECT * FROM platform.jobs WHERE status = 'dead_lettered';
+```
+
+**Safe remediation:**
+1. Identify the payment from job payload
+2. Check root cause: `last_error` column in platform.jobs
+3. For `execute-payment` jobs: ensure downstream services are healthy
+4. `POST /api/repair/:paymentId/retry` to enqueue a new saga job
+5. Monitor for success
+
+**Escalation:** Persistent dead-letter after 3 manual retries → investigate downstream service health.
+
+## Outbox Delivery Failure
+
+**Symptoms:** Audit events, alerts, or reconciliation exceptions not appearing. Relay worker logs `relay_delivery_failed`.
+
+**Detection:**
+```sql
+SELECT count(*) FROM platform.outbox_events WHERE published_at IS NULL;
+```
+
+**Safe remediation:**
+1. Check relay worker health: `curl http://127.0.0.1:9101/health`
+2. Check consumer service health (operations, reconciliation)
+3. If relay worker crashed: restart it (`npm run dev` handles this)
+4. Events remain in `published_at IS NULL` state and are retried automatically
+
+**Escalation:** If events remain unpublished for > 1 hour, check relay worker logs for systemic failures.
+
+## Webhook Signature Failure
+
+**Symptoms:** Webhook endpoint returns 401, provider reports delivery failures.
+
+**Detection:**
+```sql
+SELECT * FROM platform.webhook_events
+WHERE signature_valid = false
+  AND received_at > now() - INTERVAL '1 hour';
+```
+
+**Safe remediation:**
+1. Verify provider secret in `operations.providers.webhook_secret`
+2. Check signature algorithm (HMAC-SHA256 over JSON body)
+3. Use CLI to verify: `echo -n '{"eventId":"x"}' | openssl dgst -sha256 -hmac "<secret>"`
+4. Update secret if rotated
+
+**Escalation:** Never accept unsigned payloads. Do not commit webhook secrets.
+
+## Tenant Isolation Sanity Check
+
+**Detection:**
+```sql
+SELECT p.status, count(*)
+FROM payment.payments p
+JOIN identity.tenants t ON p.tenant_id = t.id
+GROUP BY p.status, t.name
+ORDER BY t.name, p.status;
+```
+
+**Remediation:** Cross-tenant access is prevented by application-layer tenant_id filtering. Postgres RLS planned for M4.
+
+## DB Invariant Checks
+
+Run periodically:
+```sql
+-- Negative balances (must be 0)
+SELECT * FROM wallet.wallet_balances WHERE balance < 0;
+
+-- Unbalanced ledger transactions (must be 0)
+SELECT lt.id, SUM(CASE WHEN le.direction='debit' THEN le.amount ELSE -le.amount END) AS imbalance
+FROM wallet.ledger_transactions lt
+JOIN wallet.ledger_entries le ON le.transaction_id = lt.id
+GROUP BY lt.id
+HAVING SUM(CASE WHEN le.direction='debit' THEN le.amount ELSE -le.amount END) <> 0;
+
+-- Null tenant_id in platform tables (must be 0)
+SELECT count(*) FROM platform.jobs WHERE tenant_id IS NULL;
+SELECT count(*) FROM platform.outbox_events WHERE tenant_id IS NULL;
+```
+
+## Service Restart Procedure
+
+1. `kill -SIGTERM <pid>` for each service process (graceful)
+2. Workers (relay, job) handle in-flight jobs before exit
+3. Gateway drains active connections
+4. Restart: `npm run dev` starts all services + workers
+
+## Backup / Restore Quick Reference
+
+Backup:
+```bash
+pg_dump -U postgres -h 127.0.0.1 treasury_dev > backup_$(date +%Y%m%d_%H%M%S).sql
+```
+
+Restore:
+```bash
+psql -U postgres -h 127.0.0.1 -c "CREATE DATABASE treasury_restored"
+psql -U postgres -h 127.0.0.1 treasury_restored < backup.sql
+```
+
+Post-restore: run migration checker to verify schema version.
