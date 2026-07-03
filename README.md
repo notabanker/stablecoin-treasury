@@ -18,7 +18,13 @@ Build a corporate-grade treasury SaaS platform that lets EU mid-to-large corpora
 
 ## Run
 
-Run the microservices stack:
+Requires a local Postgres instance (`postgres://127.0.0.1:5432` by default). One-time setup:
+
+```bash
+npm run db:setup
+```
+
+Then run the microservices stack:
 
 ```bash
 npm run dev

@@ -1,10 +1,12 @@
+import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import pg from "pg";
+import { runMigrations } from "../../db/scripts/migrate.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const adminUrl = process.env.DATABASE_ADMIN_URL || "postgres://127.0.0.1:5432/postgres";
 
 const serviceDefs = [
   ["wallet", "services/wallet-service/src/index.mjs", "PORT"],
@@ -25,6 +27,35 @@ function allocatePortBase() {
   return base;
 }
 
+// Each stack gets its own freshly migrated database, exactly like the temp-directory-per-stack
+// approach this replaced for the JSON store. Postgres is a shared server (not a per-test
+// process), so isolation has to come from the database name instead of a filesystem path.
+async function createTestDatabase() {
+  const name = `treasury_test_${Date.now().toString(36)}_${randomBytes(4).toString("hex")}`;
+  const admin = new pg.Client({ connectionString: adminUrl });
+  await admin.connect();
+  try {
+    await admin.query(`CREATE DATABASE "${name}"`);
+  } finally {
+    await admin.end();
+  }
+  const url = new URL(adminUrl);
+  url.pathname = `/${name}`;
+  await runMigrations(url.toString(), { quiet: true });
+  return { name, url: url.toString() };
+}
+
+async function dropDatabase(name) {
+  const admin = new pg.Client({ connectionString: adminUrl });
+  await admin.connect();
+  try {
+    await admin.query(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`, [name]);
+    await admin.query(`DROP DATABASE IF EXISTS "${name}"`);
+  } finally {
+    await admin.end();
+  }
+}
+
 export async function startStack({ verbose = false } = {}) {
   const portBase = allocatePortBase();
   const ports = {
@@ -37,11 +68,11 @@ export async function startStack({ verbose = false } = {}) {
     payment: portBase + 4,
     gateway: portBase
   };
-  const dataDir = mkdtempSync(join(tmpdir(), "cstp-test-"));
+  const database = await createTestDatabase();
 
   const sharedEnv = {
     ...process.env,
-    DATA_DIR: dataDir,
+    DATABASE_URL: database.url,
     HOST: "127.0.0.1",
     WALLET_SERVICE_URL: `http://127.0.0.1:${ports.wallet}`,
     POLICY_SERVICE_URL: `http://127.0.0.1:${ports.policy}`,
@@ -71,18 +102,18 @@ export async function startStack({ verbose = false } = {}) {
     await waitForAll(ports);
   } catch (error) {
     stopChildren(children);
-    rmSync(dataDir, { recursive: true, force: true });
+    await dropDatabase(database.name);
     throw error;
   }
 
   return {
     baseUrl: `http://127.0.0.1:${ports.gateway}`,
     ports,
-    dataDir,
+    databaseName: database.name,
     async stop() {
       stopChildren(children);
       await sleep(150);
-      rmSync(dataDir, { recursive: true, force: true });
+      await dropDatabase(database.name);
     }
   };
 }

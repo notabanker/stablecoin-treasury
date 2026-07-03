@@ -1,16 +1,61 @@
 x-service-common: &service-common
   build: .
   restart: unless-stopped
-  volumes:
-    - service-data:/data
+
+x-app-env: &app-env
+  DATABASE_URL: postgres://treasury:treasury@postgres:5432/treasury
+  HOST: 0.0.0.0
+  ACCOUNTING_SERVICE_URL: http://accounting-service:4105
+  COMPLIANCE_SERVICE_URL: http://compliance-service:4103
+  OPERATIONS_SERVICE_URL: http://operations-service:4107
+  PAYMENT_SERVICE_URL: http://payment-service:4104
+  POLICY_SERVICE_URL: http://policy-service:4102
+  RECONCILIATION_SERVICE_URL: http://reconciliation-service:4106
+  WALLET_SERVICE_URL: http://wallet-service:4101
+
+x-depends-on-db: &depends-on-db
+  postgres:
+    condition: service_healthy
+  db-migrate:
+    condition: service_completed_successfully
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: treasury
+      POSTGRES_PASSWORD: treasury
+      POSTGRES_DB: treasury
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U treasury -d treasury"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "5432:5432"
+
+  # One-shot job: applies db/migrations/*.sql then exits. Every app service depends on this
+  # completing successfully (not just on Postgres being reachable) so no service ever starts
+  # against an unmigrated schema.
+  db-migrate:
+    <<: *service-common
+    command: node db/scripts/migrate.mjs
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://treasury:treasury@postgres:5432/treasury
+
   wallet-service:
     <<: *service-common
     command: node services/wallet-service/src/index.mjs
+    depends_on: *depends-on-db
     environment:
-      DATA_DIR: /data
-      HOST: 0.0.0.0
+      <<: *app-env
       PORT: 4101
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4101/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
@@ -21,9 +66,9 @@ services:
   policy-service:
     <<: *service-common
     command: node services/policy-service/src/index.mjs
+    depends_on: *depends-on-db
     environment:
-      DATA_DIR: /data
-      HOST: 0.0.0.0
+      <<: *app-env
       PORT: 4102
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4102/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
@@ -34,9 +79,9 @@ services:
   compliance-service:
     <<: *service-common
     command: node services/compliance-service/src/index.mjs
+    depends_on: *depends-on-db
     environment:
-      DATA_DIR: /data
-      HOST: 0.0.0.0
+      <<: *app-env
       PORT: 4103
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4103/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
@@ -48,6 +93,7 @@ services:
     <<: *service-common
     command: node services/payment-service/src/index.mjs
     depends_on:
+      <<: *depends-on-db
       wallet-service:
         condition: service_healthy
       policy-service:
@@ -61,15 +107,8 @@ services:
       operations-service:
         condition: service_healthy
     environment:
-      ACCOUNTING_SERVICE_URL: http://accounting-service:4105
-      COMPLIANCE_SERVICE_URL: http://compliance-service:4103
-      DATA_DIR: /data
-      HOST: 0.0.0.0
-      OPERATIONS_SERVICE_URL: http://operations-service:4107
-      POLICY_SERVICE_URL: http://policy-service:4102
+      <<: *app-env
       PORT: 4104
-      RECONCILIATION_SERVICE_URL: http://reconciliation-service:4106
-      WALLET_SERVICE_URL: http://wallet-service:4101
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4104/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 10s
@@ -79,9 +118,9 @@ services:
   accounting-service:
     <<: *service-common
     command: node services/accounting-service/src/index.mjs
+    depends_on: *depends-on-db
     environment:
-      DATA_DIR: /data
-      HOST: 0.0.0.0
+      <<: *app-env
       PORT: 4105
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4105/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
@@ -92,9 +131,9 @@ services:
   reconciliation-service:
     <<: *service-common
     command: node services/reconciliation-service/src/index.mjs
+    depends_on: *depends-on-db
     environment:
-      DATA_DIR: /data
-      HOST: 0.0.0.0
+      <<: *app-env
       PORT: 4106
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4106/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
@@ -105,9 +144,9 @@ services:
   operations-service:
     <<: *service-common
     command: node services/operations-service/src/index.mjs
+    depends_on: *depends-on-db
     environment:
-      DATA_DIR: /data
-      HOST: 0.0.0.0
+      <<: *app-env
       PORT: 4107
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4107/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
@@ -134,23 +173,18 @@ services:
       operations-service:
         condition: service_healthy
     environment:
-      ACCOUNTING_SERVICE_URL: http://accounting-service:4105
-      COMPLIANCE_SERVICE_URL: http://compliance-service:4103
-      DATA_DIR: /data
+      <<: *app-env
       GATEWAY_PORT: 8080
-      HOST: 0.0.0.0
-      OPERATIONS_SERVICE_URL: http://operations-service:4107
-      PAYMENT_SERVICE_URL: http://payment-service:4104
-      POLICY_SERVICE_URL: http://policy-service:4102
-      RECONCILIATION_SERVICE_URL: http://reconciliation-service:4106
-      WALLET_SERVICE_URL: http://wallet-service:4101
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:8080/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 10s
       timeout: 3s
       retries: 5
     ports:
+      # Only the gateway is published -- internal service ports (4101-4107) stay on the compose
+      # network so nothing outside the gateway/ingress can bypass policy evaluation, audit, or
+      # (once M4 lands) authentication.
       - "8080:8080"
 
 volumes:
-  service-data:
+  postgres-data:

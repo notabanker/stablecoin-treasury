@@ -1,28 +1,42 @@
-import { createId, createSeedData } from "../../../packages/shared/data.mjs";
+import { createId } from "../../../packages/shared/data.mjs";
+import { query } from "../../../packages/shared/db.mjs";
 import { createJsonService, httpError, ok, route } from "../../../packages/shared/http.mjs";
-import { createDurableStore } from "../../../packages/shared/store.mjs";
+import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
+import { reseedReconciliation } from "./seed.mjs";
 
 const port = Number(process.env.PORT || 4106);
-const store = createDurableStore("reconciliation-service", () => ({ reconciliation: createSeedData().reconciliation }));
+const DB = "reconciliation";
+
+await bootstrap();
 
 createJsonService({
   name: "reconciliation-service",
   port,
   routes: [
     route("GET", "/health", () => ok({ status: "ok", service: "reconciliation-service" })),
-    route("GET", "/ready", () => ok({ status: "ready" })),
-    route("POST", "/reset", () => ok(store.reset())),
-    route("GET", "/reconciliation", () => ok(store.state.reconciliation.map(withComputedAge))),
-    route("POST", "/reconciliation/matched", ({ body }) => {
+    route("GET", "/ready", async () => {
+      await query(DB, "SELECT 1");
+      return ok({ status: "ready" });
+    }),
+    route("POST", "/reset", async () => {
+      await reseedReconciliation();
+      return ok(await listReconciliation());
+    }),
+    route("GET", "/reconciliation", async () => ok(await listReconciliation())),
+    route("POST", "/reconciliation/matched", async ({ body }) => {
       if (!body.payment) {
         throw httpError(422, "Payment is required", "missing_payment");
       }
       const payment = body.payment;
-      const existing = store.state.reconciliation.find((entry) => entry.paymentId === payment.id && entry.issue === "Matched");
-      if (existing) {
-        return ok(withComputedAge(existing));
+      const { rows: existingRows } = await query(
+        DB,
+        "SELECT * FROM reconciliation.reconciliation_rows WHERE payment_id = $1 AND issue = 'Matched'",
+        [payment.id]
+      );
+      if (existingRows[0]) {
+        return ok(withComputedAge(existingRows[0]));
       }
-      const item = {
+      const row = {
         id: createId("rec"),
         paymentId: payment.id,
         source: body.source || "On-chain event",
@@ -30,19 +44,31 @@ createJsonService({
         amount: payment.amount,
         asset: payment.asset,
         status: "Resolved",
-        owner: "Auto",
-        createdAt: new Date().toISOString()
+        owner: "Auto"
       };
-      store.state.reconciliation.unshift(item);
-      store.save();
-      return ok(withComputedAge(item));
+      try {
+        const inserted = await insertRow(row);
+        return ok(withComputedAge(inserted));
+      } catch (error) {
+        // 23505 = unique_violation on reconciliation_rows_matched_once_per_payment (0009): a
+        // concurrent call already inserted the Matched row between our existence check and ours.
+        if (error.code === "23505") {
+          const { rows: raced } = await query(
+            DB,
+            "SELECT * FROM reconciliation.reconciliation_rows WHERE payment_id = $1 AND issue = 'Matched'",
+            [payment.id]
+          );
+          return ok(withComputedAge(raced[0]));
+        }
+        throw error;
+      }
     }),
-    route("POST", "/reconciliation/exceptions", ({ body }) => {
+    route("POST", "/reconciliation/exceptions", async ({ body }) => {
       if (!body.payment) {
         throw httpError(422, "Payment is required", "missing_payment");
       }
       const payment = body.payment;
-      const item = {
+      const row = {
         id: createId("rec"),
         paymentId: payment.id,
         source: body.source || "Policy engine",
@@ -50,19 +76,17 @@ createJsonService({
         amount: Number(body.amount ?? payment.amount),
         asset: body.asset || payment.asset,
         status: "Open",
-        owner: body.owner || "Treasury Ops",
-        createdAt: new Date().toISOString()
+        owner: body.owner || "Treasury Ops"
       };
-      store.state.reconciliation.unshift(item);
-      store.save();
-      return ok(withComputedAge(item));
+      const inserted = await insertRow(row);
+      return ok(withComputedAge(inserted));
     }),
-    route("POST", "/reconciliation/exceptions/simulate", ({ body }) => {
+    route("POST", "/reconciliation/exceptions/simulate", async ({ body }) => {
       const payment = body.payment;
       if (!payment) {
         throw httpError(422, "Payment is required", "missing_payment");
       }
-      const item = {
+      const row = {
         id: createId("rec"),
         paymentId: payment.id,
         source: "Ledger snapshot",
@@ -70,30 +94,65 @@ createJsonService({
         amount: payment.fee || 0,
         asset: payment.asset,
         status: "Open",
-        owner: "Treasury Ops",
-        createdAt: new Date().toISOString()
+        owner: "Treasury Ops"
       };
-      store.state.reconciliation.unshift(item);
-      store.save();
-      return ok(withComputedAge(item));
+      const inserted = await insertRow(row);
+      return ok(withComputedAge(inserted));
     }),
-    route("POST", "/reconciliation/:id/resolve", ({ params, body }) => {
-      const item = store.state.reconciliation.find((entry) => entry.id === params.id);
-      if (!item) {
+    route("POST", "/reconciliation/:id/resolve", async ({ params, body }) => {
+      const { rows } = await query(
+        DB,
+        "UPDATE reconciliation.reconciliation_rows SET status = 'Resolved', owner = $1, resolved_at = now() WHERE id = $2 AND tenant_id = $3 RETURNING *",
+        [body?.owner || "Treasury Ops", params.id, DEFAULT_TENANT_ID]
+      );
+      if (!rows[0]) {
         throw httpError(404, `reconciliation ${params.id} not found`, "not_found");
       }
-      item.status = "Resolved";
-      item.owner = body?.owner || "Treasury Ops";
-      item.resolvedAt = new Date().toISOString();
-      store.save();
-      return ok(withComputedAge(item));
+      return ok(withComputedAge(rows[0]));
     })
   ]
 });
 
-function withComputedAge(item) {
-  const createdAt = item.createdAt || new Date().toISOString();
-  const endedAt = item.resolvedAt ? new Date(item.resolvedAt) : new Date();
-  const ageHours = Math.max(0, (endedAt.getTime() - new Date(createdAt).getTime()) / 3_600_000);
-  return { ...item, createdAt, ageHours: Math.round(ageHours * 10) / 10 };
+async function insertRow(row) {
+  const { rows } = await query(
+    DB,
+    `INSERT INTO reconciliation.reconciliation_rows (id, tenant_id, payment_id, source, issue, amount, asset, status, owner)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+    [row.id, DEFAULT_TENANT_ID, row.paymentId, row.source, row.issue, row.amount, row.asset, row.status, row.owner]
+  );
+  return rows[0];
+}
+
+function withComputedAge(row) {
+  const createdAt = row.created_at instanceof Date ? row.created_at : new Date(row.created_at);
+  const endedAt = row.resolved_at ? new Date(row.resolved_at) : new Date();
+  const ageHours = Math.max(0, (endedAt.getTime() - createdAt.getTime()) / 3_600_000);
+  return {
+    id: row.id,
+    paymentId: row.payment_id,
+    source: row.source,
+    issue: row.issue,
+    amount: Number(row.amount),
+    asset: row.asset,
+    status: row.status,
+    owner: row.owner,
+    createdAt: createdAt.toISOString(),
+    ageHours: Math.round(ageHours * 10) / 10
+  };
+}
+
+async function listReconciliation() {
+  const { rows } = await query(DB, "SELECT * FROM reconciliation.reconciliation_rows WHERE tenant_id = $1 ORDER BY created_at DESC", [
+    DEFAULT_TENANT_ID
+  ]);
+  return rows.map(withComputedAge);
+}
+
+async function bootstrap() {
+  const { rows } = await query(DB, "SELECT COUNT(*)::int AS count FROM reconciliation.reconciliation_rows WHERE tenant_id = $1", [
+    DEFAULT_TENANT_ID
+  ]);
+  if (rows[0].count === 0) {
+    await reseedReconciliation();
+  }
 }
