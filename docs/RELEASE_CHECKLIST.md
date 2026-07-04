@@ -38,6 +38,19 @@
 - [ ] Session cookies include `Secure` flag
 - [ ] `HttpOnly` on session cookies verified via browser dev tools
 - [ ] Webhook signatures validated for all providers
+- [ ] `TRUST_PROXY_HEADERS=true` only if a trusted proxy overwrites `X-Forwarded-For`
+
+## Adversarial Probes (run against staging)
+
+- [ ] Cookie-authenticated `POST /api/logout` without `X-Csrf-Token` returns `403 csrf_invalid`
+- [ ] Cookie-authenticated `POST /api/logout` with correct `X-Csrf-Token` returns `200`
+- [ ] Cookie-authenticated mutation with session `csrf_token=NULL` returns `403 csrf_invalid`
+- [ ] Failed login for a known non-default-tenant email writes `Login failed` under that tenant
+- [ ] Lockout for a known non-default-tenant email writes `Login lockout` under that tenant
+- [ ] Unknown-email failed login writes audit under the default platform tenant
+- [ ] With `TRUST_PROXY_HEADERS=true`, distinct `X-Forwarded-For` IPs get distinct rate-limit buckets
+- [ ] With `TRUST_PROXY_HEADERS` unset, spoofed `X-Forwarded-For` does not bypass the socket-IP limiter
+- [ ] Unsigned direct request to an internal service returns `401 internal_auth_required`
 
 ## Rollback Plan
 

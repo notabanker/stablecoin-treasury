@@ -31,7 +31,37 @@
 | `LOGIN_RATE_LIMIT_WINDOW_MS` | `60000` | Login failure window |
 | `LOGIN_RATE_LIMIT_MAX` | `5` | Max login failures |
 | `LOGIN_LOCKOUT_MS` | `300000` | Lockout duration |
+| `TRUST_PROXY_HEADERS` | unset | Honor `X-Forwarded-For` for client IP (see below) |
 | `ALLOW_DEMO_RESET` | unset | Allow reset in production |
+
+## Client IP and Rate Limiting
+
+- By default the client IP is the socket peer address; `X-Forwarded-For` is ignored so it cannot
+  be spoofed by direct callers.
+- Set `TRUST_PROXY_HEADERS=true` **only** when every request reaches the service through a trusted
+  reverse proxy that overwrites `X-Forwarded-For`. The leftmost entry is then used as the canonical
+  client IP.
+- The same canonical client IP feeds request context (`ctx.clientIp`), the general/state API rate
+  limiters, and the login rate limiter, so per-client buckets stay consistent behind a proxy.
+- `GET /health` bypasses API rate limiting so orchestrator health checks never consume tokens.
+
+## Login Audit Tenant Attribution
+
+- Failed-login and lockout security audit events for a **known** email are written under that
+  user's tenant (resolved by normalized email before password verification; existence is never
+  leaked through the API response).
+- Failed logins for **unknown** emails are written under the default platform tenant
+  (`00000000-0000-0000-0000-000000000001`). This fallback is intentional: there is no tenant to
+  attribute to, and platform operators still need visibility into credential-stuffing attempts.
+
+## CSRF Sessions
+
+- Cookie-authenticated mutating requests require a matching `X-Csrf-Token` header. Sessions with a
+  missing/`NULL` `csrf_token` are rejected with `403 csrf_invalid` — they cannot mutate.
+- `identity.sessions.csrf_token` remains nullable in the schema; strictness is enforced at runtime
+  (`verifyCsrf`) and covered by regression tests. A `NOT NULL` constraint is deliberately deferred:
+  schema changes require explicit human approval, and backfilling a token for legacy rows would not
+  make them usable anyway (the browser never received that token).
 
 ## Secret Handling
 

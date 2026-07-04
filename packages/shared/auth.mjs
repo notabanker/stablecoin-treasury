@@ -111,19 +111,11 @@ export async function destroySession(token) {
 }
 
 export async function authenticateUser(email, password) {
-  const normalizedEmail = String(email || "").trim().toLowerCase();
-  const { rows } = await query(
-    DB,
-    `SELECT *
-       FROM identity.users
-      WHERE lower(email) = $1
-        AND status = 'active'
-      ORDER BY tenant_id
-      LIMIT 2`,
-    [normalizedEmail]
-  );
+  // Emails are unique per tenant, not globally: the same email may exist in two
+  // tenants with different passwords, so the password decides which user matches.
+  const users = await resolveUsersByEmail(email);
   let matching = null;
-  for (const row of rows) {
+  for (const row of users) {
     if (verifyPassword(password, row.password_hash)) {
       matching = row;
       break;
@@ -140,6 +132,30 @@ export async function authenticateUser(email, password) {
     tenantId: matching.tenant_id,
     roles: await loadRoles(matching.id)
   };
+}
+
+async function resolveUsersByEmail(email) {
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  const { rows } = await query(
+    DB,
+    `SELECT *
+       FROM identity.users
+      WHERE lower(email) = $1
+        AND status = 'active'
+      ORDER BY tenant_id
+      LIMIT 2`,
+    [normalizedEmail]
+  );
+  return rows;
+}
+
+// Resolve a user by email without password verification, for tenant-scoped audit
+// attribution on failed logins. Returns the raw DB row (including password_hash —
+// callers must never expose it) or null if no active user matches. If the same
+// email exists in multiple tenants, the lowest tenant_id wins deterministically.
+export async function resolveUserByEmail(email) {
+  const rows = await resolveUsersByEmail(email);
+  return rows[0] || null;
 }
 
 export function needsPasswordRehash(hash) {
@@ -199,9 +215,8 @@ export async function validateSession(token) {
 export function verifyCsrf(sessionUser, headerToken, { authSource } = {}) {
   // Bearer-auth users can't read the csrf cookie; skip CSRF for them.
   if (authSource === "bearer") return true;
-  // If the user has no csrfToken, skip CSRF validation.
-  if (!sessionUser?.csrfToken) return true;
-  // Cookie-authenticated users MUST present a matching X-Csrf-Token header on mutations.
+  // Cookie-authenticated MUST have a non-empty csrfToken and present a matching header.
+  if (!sessionUser?.csrfToken) return false;
   return String(headerToken || "") === String(sessionUser.csrfToken);
 }
 
@@ -227,7 +242,7 @@ export function csrfCookieHeader(token, expiresAt) {
 // requests skip CSRF validation (they can't read the cookie anyway).
 export function requireAuthWithCsrf(routeHandler, opts = {}) {
   return requireAuth(async (context) => {
-    const isCookieAuth = AUTH_REQUIRED && context.user?._authSource === "cookie" && context.user?.csrfToken;
+    const isCookieAuth = AUTH_REQUIRED && context.user?._authSource === "cookie";
     const isMutation = !["GET", "HEAD", "OPTIONS"].includes(context.method);
     if (isCookieAuth && isMutation) {
       const headerToken = context.headers["x-csrf-token"] || "";

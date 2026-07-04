@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
+import { createServer as createNetServer } from "node:net";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
@@ -27,10 +28,15 @@ const serviceDefs = [
 const portHash = (process.pid * 37 + Math.floor(Date.now() / 60000) * 31) % 5000;
 let nextPortBase = 20000 + portHash;
 
-function allocatePortBase() {
-  const base = nextPortBase;
-  nextPortBase += 20;
-  return base;
+async function allocatePortBase() {
+  for (let attempt = 0; attempt < 1000; attempt += 1) {
+    const base = nextPortBase;
+    nextPortBase += 20;
+    const candidates = Array.from({ length: 10 }, (_, offset) => base + offset);
+    const availability = await Promise.all(candidates.map((port) => isPortAvailable(port)));
+    if (availability.every(Boolean)) return base;
+  }
+  throw new Error("Unable to allocate a free 10-port block for the test stack");
 }
 
 // Each stack gets its own freshly migrated database, exactly like the temp-directory-per-stack
@@ -62,8 +68,8 @@ async function dropDatabase(name) {
   }
 }
 
-export async function startStack({ verbose = false } = {}) {
-  const portBase = allocatePortBase();
+export async function startStack({ verbose = false, extraEnv = {} } = {}) {
+  const portBase = await allocatePortBase();
   const ports = {
     wallet: portBase + 1,
     policy: portBase + 2,
@@ -80,6 +86,7 @@ export async function startStack({ verbose = false } = {}) {
 
   const sharedEnv = {
     ...process.env,
+    ...extraEnv,
     DATABASE_URL: database.url,
     HOST: "127.0.0.1",
     WALLET_SERVICE_URL: `http://127.0.0.1:${ports.wallet}`,
@@ -165,7 +172,7 @@ async function waitForAll(ports, { timeoutMs = 45000 } = {}) {
     for (const name of names) {
       if (ready.has(name)) continue;
       try {
-        const response = await fetch(`http://127.0.0.1:${ports[name]}/health`);
+        const response = await fetchWithTimeout(`http://127.0.0.1:${ports[name]}/health`, 1000);
         if (response.ok) ready.add(name);
       } catch {
         // not up yet
@@ -180,4 +187,25 @@ async function waitForAll(ports, { timeoutMs = 45000 } = {}) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isPortAvailable(port) {
+  return new Promise((resolve) => {
+    const server = createNetServer();
+    server.once("error", () => resolve(false));
+    server.once("listening", () => {
+      server.close(() => resolve(true));
+    });
+    server.listen(port, "127.0.0.1");
+  });
+}
+
+async function fetchWithTimeout(url, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
 }

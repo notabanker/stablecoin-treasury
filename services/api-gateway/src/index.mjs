@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ratesToEur } from "../../../packages/shared/data.mjs";
-import { authenticateUser, checkLoginRateLimit, clearLoginFailures, createSession, csrfCookieHeader, destroySession, emitSecurityAudit, recordLoginFailure, requireAuth, requireAuthWithCsrf, requirePermission, sessionCookieHeader, verifyCsrf } from "../../../packages/shared/auth.mjs";
+import { authenticateUser, checkLoginRateLimit, clearLoginFailures, createSession, csrfCookieHeader, destroySession, emitSecurityAudit, recordLoginFailure, requireAuth, requireAuthWithCsrf, requirePermission, resolveUserByEmail, sessionCookieHeader } from "../../../packages/shared/auth.mjs";
 import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
 import { createJsonService, httpError, ok, route } from "../../../packages/shared/http.mjs";
 import { serviceGet, servicePost, serviceUrls } from "../../../packages/shared/service-client.mjs";
@@ -32,7 +32,7 @@ createJsonService({
       const result = await login(ctx.body, ctx);
       return { status: 200, body: result.body, cookies: result.cookies };
     }),
-    route("POST", "/api/logout", requireAuth(async (ctx) => ok(await logout(ctx)))),
+    route("POST", "/api/logout", requireAuthWithCsrf(async (ctx) => ok(await logout(ctx)))),
     route("POST", "/api/reset", perm("admin:reset")(async (ctx) => {
       const options = tenantOptions(ctx);
       await Promise.all([
@@ -152,17 +152,21 @@ async function login(body, ctx) {
 
   const ip = ctx?.clientIp || "127.0.0.1";
 
+  // Resolve tenant for audit events before credential check (does not leak existence).
+  const resolvedUser = await resolveUserByEmail(email);
+  const auditTenant = resolvedUser ? resolvedUser.tenant_id : DEFAULT_TENANT_ID;
+
   // Rate limit check
   const rateCheck = checkLoginRateLimit(ip, email);
   if (!rateCheck.allowed) {
-    await emitSecurityAudit({ actor: email, action: "Login lockout", object: ip, detail: "Rate limited after too many failures", tenantId: DEFAULT_TENANT_ID });
+    await emitSecurityAudit({ actor: email, action: "Login lockout", object: ip, detail: "Rate limited after too many failures", tenantId: auditTenant });
     throw httpError(429, "Too many failed login attempts. Try again later.", "login_rate_limited");
   }
 
   const user = await authenticateUser(email, password);
   if (!user) {
     const result = recordLoginFailure(ip, email);
-    await emitSecurityAudit({ actor: email, action: "Login failed", object: ip, detail: result.lockedOut ? "Account locked out" : `Failed attempt ${result.failures}`, tenantId: DEFAULT_TENANT_ID });
+    await emitSecurityAudit({ actor: email, action: "Login failed", object: ip, detail: result.lockedOut ? "Account locked out" : `Failed attempt ${result.failures}`, tenantId: auditTenant });
     if (result.lockedOut) {
       throw httpError(429, "Too many failed login attempts. Account temporarily locked.", "login_rate_limited");
     }

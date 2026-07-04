@@ -52,7 +52,6 @@ All 5 epics delivered. 83 tests passing. Production boot gate blocks startup wit
 | Session cookies lack `__Host-` prefix | Low | SameSite=Lax mitigates most attacks |
 | No mTLS for internal service traffic | Low | Services bind to 127.0.0.1 only |
 | CI workflow not tested in GitHub Actions | Medium | Syntax/format verified locally; PR-triggered run will validate |
-| Login rate limiter uses hardcoded IP | Low | Production should derive IP from X-Forwarded-For |
 | No OIDC / SSO integration | Medium | Local login only; OIDC planned for post-V5 |
 | No hardware-based key storage | Low | HMAC secrets are env-string based |
 
@@ -65,3 +64,23 @@ All 5 epics delivered. 83 tests passing. Production boot gate blocks startup wit
 | **Production money-movement ready** | ⚠️ No | Production boot gate works but actual production deployment requires: secrets manager, WAF, cloud-managed Postgres with PITR, mTLS or service mesh, real provider integrations. The code is hardened; the infrastructure is not yet productionized. |
 
 The platform is structurally sound for production if deployed behind a cloud ingress with managed Postgres, proper secrets injection, and WAF. The application layer has no known safety gaps for money movement — ledger is append-only double-entry, payment state machine is DB-enforced, all side effects are durable via outbox, auth/RBAC is implemented, tenant isolation is enforced.
+
+## V5.1 Addendum — Remaining Verified Gaps Closed (2026-07-04)
+
+The five gaps from `docs/V5_REMAINING_GAPS_FIX_INSTRUCTION.md` are fixed with regression coverage:
+
+| Gap | Old behavior (reproduced) | New behavior | Proof |
+|---|---|---|---|
+| Logout bypasses CSRF (HIGH) | Cookie-only `POST /api/logout` without `X-Csrf-Token` returned 200 | Returns `403 csrf_invalid`; with correct header returns 200 | 2 integration tests in `tests/integration/auth-rbac.test.mjs` |
+| Null-CSRF sessions can mutate (HIGH) | Session with `csrf_token=NULL` could `POST /api/payments` | `verifyCsrf` rejects empty/null session tokens → `403 csrf_invalid` | Integration test (DB-nulled session) + 3 unit tests in `tests/unit/auth.test.mjs` |
+| Failed-login audit uses default tenant (MEDIUM) | Tenant-2 failed login / lockout audited under tenant 1 | Known emails audited under their own tenant; unknown emails fall back to the default platform tenant (documented in `docs/ENVIRONMENT.md`) | 3 integration tests (failed login, lockout, unknown email) |
+| Rate limiter ignores trusted forwarded IP (MEDIUM) | Buckets always keyed by socket IP | Buckets keyed by canonical client IP (`TRUST_PROXY_HEADERS`-aware); spoofed `X-Forwarded-For` still ignored by default | 2 integration tests (trusted / untrusted) |
+| Missing regression coverage (MEDIUM) | Suite green but gaps untested | 9 integration + 3 unit tests added; adversarial probes added to `docs/RELEASE_CHECKLIST.md` | `npm run test:all` — 95 tests passing |
+
+Notes:
+- `identity.sessions.csrf_token` stays nullable at the schema level; enforcement is strict at
+  runtime. Rationale in `docs/ENVIRONMENT.md` (§ CSRF Sessions).
+- Multi-tenant duplicate emails (schema allows the same email in two tenants) still authenticate
+  by password match across candidate rows; audit attribution for ambiguous emails resolves to the
+  lowest tenant id deterministically.
+- Current totals: **95 tests passing** (49 unit + 42 integration + 4 concurrency).

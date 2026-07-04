@@ -21,8 +21,20 @@ const STATE_RATE_MAX = Number(process.env.STATE_RATE_LIMIT_MAX || 50);
 const rateBuckets = new Map();
 let rateCleanupTimer = null;
 
+// Proxy-aware client IP extraction: use socket address by default.
+// Set TRUST_PROXY_HEADERS=true to honor X-Forwarded-For from trusted proxies.
+function getClientIp(req) {
+  const trustProxy = process.env.TRUST_PROXY_HEADERS === "true";
+  if (trustProxy && req.headers["x-forwarded-for"]) {
+    const fwd = req.headers["x-forwarded-for"].split(",")[0].trim();
+    return fwd.startsWith("::ffff:") ? fwd.slice(7) : fwd;
+  }
+  const remote = req.socket?.remoteAddress || "127.0.0.1";
+  return remote.startsWith("::ffff:") ? remote.slice(7) : remote;
+}
+
 function checkRateLimit(req, now, windowMs, limit, bucketKey) {
-  const ip = req.socket?.remoteAddress || "127.0.0.1";
+  const ip = getClientIp(req);
   const key = `${bucketKey}:${ip}`;
   let bucket = rateBuckets.get(key);
   if (!bucket || bucket.resetAt <= now) {
@@ -82,22 +94,25 @@ export function createJsonService({ name, port, routes, staticRoot, internalAuth
       }
 
       // Rate limiting: separate buckets for state reads vs general routes.
-      const isStateRoute = url.pathname === "/api/state";
-      const bucketKey = isStateRoute ? "state" : "general";
-      const rateLimit = isStateRoute
-        ? STATE_RATE_MAX
-        : RATE_MAX;
-      const rateResult = checkRateLimit(req, Date.now(), RATE_WINDOW_MS, rateLimit, bucketKey);
-      if (!rateResult.allowed) {
-        res.setHeader("Retry-After", Math.ceil(rateResult.retryAfterMs / 1000));
-        sendJson(res, 429, {
-          error: "rate_limited",
-          message: "Too many requests",
-          retryAfterMs: rateResult.retryAfterMs
-        });
-        metrics.record(429, Date.now() - started);
-        logRequest(name, req.method, url.pathname, 429, Date.now() - started, requestId);
-        return;
+      // Bypass for health checks so they never consume rate-limit tokens.
+      if (url.pathname !== "/health") {
+        const isStateRoute = url.pathname === "/api/state";
+        const bucketKey = isStateRoute ? "state" : "general";
+        const rateLimit = isStateRoute
+          ? STATE_RATE_MAX
+          : RATE_MAX;
+        const rateResult = checkRateLimit(req, Date.now(), RATE_WINDOW_MS, rateLimit, bucketKey);
+        if (!rateResult.allowed) {
+          res.setHeader("Retry-After", Math.ceil(rateResult.retryAfterMs / 1000));
+          sendJson(res, 429, {
+            error: "rate_limited",
+            message: "Too many requests",
+            retryAfterMs: rateResult.retryAfterMs
+          });
+          metrics.record(429, Date.now() - started);
+          logRequest(name, req.method, url.pathname, 429, Date.now() - started, requestId);
+          return;
+        }
       }
 
       const route = matchRoute(internalRoutes, req.method, url.pathname);
@@ -152,20 +167,6 @@ export function createJsonService({ name, port, routes, staticRoot, internalAuth
   });
   // headersTimeout must stay below requestTimeout: headers are a prefix of the whole request,
   // so they must always arrive first and faster.
-  // Proxy-aware client IP extraction: use socket address by default.
-  // Set TRUST_PROXY_HEADERS=true to honor X-Forwarded-For from trusted proxies.
-  function getClientIp(req) {
-    const trustProxy = process.env.TRUST_PROXY_HEADERS === "true";
-    if (trustProxy && req.headers["x-forwarded-for"]) {
-      // X-Forwarded-For: client, proxy1, proxy2 — take the leftmost (original client)
-      const fwd = req.headers["x-forwarded-for"].split(",")[0].trim();
-      // Normalize IPv4-mapped IPv6
-      return fwd.startsWith("::ffff:") ? fwd.slice(7) : fwd;
-    }
-    const remote = req.socket?.remoteAddress || "127.0.0.1";
-    return remote.startsWith("::ffff:") ? remote.slice(7) : remote;
-  }
-
   const internalRoutes = internalAuthRequired && INTERNAL_AUTH_REQUIRED
     ? routes.map((rt) => rt.public ? rt : { ...rt, handler: validateInternalAuth(rt.handler) })
     : routes;
@@ -351,7 +352,7 @@ function setBaseHeaders(res, requestId) {
     res.setHeader("Access-Control-Allow-Origin", corsOrigin);
     res.setHeader("Vary", "Origin");
   }
-  res.setHeader("Access-Control-Allow-Headers", "content-type, idempotency-key, x-request-id");
+  res.setHeader("Access-Control-Allow-Headers", "content-type, idempotency-key, x-request-id, x-csrf-token");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, OPTIONS");
   res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader("X-Content-Type-Options", "nosniff");
