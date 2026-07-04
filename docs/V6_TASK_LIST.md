@@ -39,13 +39,13 @@ Unblocked without any approval: Tasks 0.1, 0.3, 0.4, Epic 4 (except 4.3), Epic 6
 - Gate: none
 - Components: `docs/PRODUCTION_READINESS.md`
 - Subtasks:
-  - [ ] Inventory delivered capabilities milestone by milestone (M0–M5 + V5/V5.1) with, for each claim, the test file or probe that proves it (e.g. ledger append-only → `tests/integration/payment-transitions-db.test.mjs`; CSRF strictness → `tests/integration/auth-rbac.test.mjs` + `tests/unit/auth.test.mjs`).
-  - [ ] Restate the not-delivered list from `docs/V6_PLAN.md` G1–G12, each linking to its V6 epic or an explicit out-of-scope note.
-  - [ ] Keep the "Still Required Before Real Money" framing but scope it to the true remainder (infrastructure phase + Epic 5.3 sandbox certification).
-  - [ ] Refresh the test-count and command sections (95 tests as of V5.1; commands unchanged).
+  - [x] Inventory delivered capabilities milestone by milestone (M0–M5 + V5/V5.1) with, for each claim, the test file or probe that proves it (e.g. ledger append-only → `tests/integration/payment-transitions-db.test.mjs`; CSRF strictness → `tests/integration/auth-rbac.test.mjs` + `tests/unit/auth.test.mjs`).
+  - [x] Restate the not-delivered list from `docs/V6_PLAN.md` G1–G12, each linking to its V6 epic or an explicit out-of-scope note.
+  - [x] Keep the "Still Required Before Real Money" framing but scope it to the true remainder (infrastructure phase + Epic 5.3 sandbox certification).
+  - [x] Refresh the test-count and command sections (95 tests as of V5.1; commands unchanged).
 - Acceptance Criteria:
-  - [ ] Every "delivered" claim carries a test/probe reference.
-  - [ ] No delivered feature appears in the "still required" list.
+  - [x] Every "delivered" claim carries a test/probe reference.
+  - [x] No delivered feature appears in the "still required" list.
 - Tests: none (docs) — reviewed against `docs/V6_PLAN.md` gap table.
 - Definition of Done: a reader can grade readiness from this doc alone without contradicting the code.
 
@@ -77,9 +77,9 @@ Unblocked without any approval: Tasks 0.1, 0.3, 0.4, Epic 4 (except 4.3), Epic 6
 - Gate: none
 - Components: new `docs/adr/ADR-010-single-process-rate-limiting.md`, `docs/ENVIRONMENT.md`
 - Subtasks:
-  - [ ] Record the decision: in-memory limiter Maps in `packages/shared/http.mjs` (general/state buckets) and `packages/shared/auth.mjs` (login lockout) are per-process; acceptable while each service runs as a single instance; restart clears state.
-  - [ ] Record the revisit trigger: any horizontal scaling introduced by Epic 7 reopens this as a Redis-or-equivalent task.
-  - [ ] Add the constraint to `docs/ENVIRONMENT.md` next to the rate-limit variables.
+  - [x] Record the decision: in-memory limiter Maps in `packages/shared/http.mjs` (general/state buckets) and `packages/shared/auth.mjs` (login lockout) are per-process; acceptable while each service runs as a single instance; restart clears state.
+  - [x] Record the revisit trigger: any horizontal scaling introduced by Epic 7 reopens this as a Redis-or-equivalent task.
+  - [x] Add the constraint to `docs/ENVIRONMENT.md` next to the rate-limit variables.
 - Acceptance Criteria:
   - [ ] ADR merged; ENVIRONMENT.md states the constraint and the revisit trigger.
 - Tests: none (decision record).

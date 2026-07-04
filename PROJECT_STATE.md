@@ -4,14 +4,13 @@ This file is the live working memory for AI coding agents. Update it after each 
 
 ## Current Objective
 
-Continue V5 development hardening for the corporate stablecoin treasury platform.
+Execute V6 ("From Hardened Demo to Operable Pilot") per `docs/V6_EXECUTION_INSTRUCTION.md`.
+All approval gates A1–A6 are NOT APPROVED; executing unblocked tasks only (0.1, 0.3, 0.4,
+Epic 6, Epic 4 except 4.3).
 
 ## Current Task
 
-V6 planned (`docs/V6_PLAN.md`) with a detailed task/subtask breakdown (`docs/V6_TASK_LIST.md`).
-Awaiting human decisions on approval gates A1–A6 (approvals schema, RLS/roles, audit hash
-columns, csrf NOT NULL, adapter/providers schema, infra ADRs). Unblocked-by-default starting
-points per the task list's execution order: Tasks 0.1/0.3/0.4, then Epic 6, then Epic 4 (except 4.3).
+Task 0.4 — Prove CI green in GitHub Actions
 
 ## Acceptance Criteria
 
@@ -43,14 +42,34 @@ Default criteria for hardening tasks:
 
 ## Last Completed Work
 
-- Closed all five remaining verified V5 security gaps with fixes + regression tests.
-- Fixed a regression introduced mid-work: `authenticateUser` must match password across all
-  candidate rows because emails are only unique per tenant (`UNIQUE (tenant_id, email)`).
-- Added `x-csrf-token` to `Access-Control-Allow-Headers` (CSRF header is now mandatory for cookie mutations).
-- Documented: unknown-email audit fallback, `TRUST_PROXY_HEADERS`, why `csrf_token` stays nullable.
-- All 95 tests pass (49 unit + 42 integration + 4 concurrency); smoke + DB invariants clean.
+Task 0.3 — ADR-010 accepted: single-process rate limiting documented as a pilot constraint.
+Per-process in-memory Maps for rate limiting and login lockout are acceptable while each
+service runs as a single instance. Revisit trigger: horizontal scaling (Epic 7). No code
+changes — documentation only (ADR + ENVIRONMENT.md update).
 
 ## Session Log
+
+```text
+Date: 2026-07-04
+Agent: opencode
+Task: 0.3 — ADR-010: single-process rate limiting accepted for pilot
+Files changed: docs/adr/ADR-010-single-process-rate-limiting.md (new), docs/ENVIRONMENT.md (+4 lines), PROJECT_STATE.md, docs/V6_TASK_LIST.md (checkboxes)
+Tests run: npm run check (pass)
+Result: Decision recorded. In-memory rate limiters accepted as a documented single-instance constraint. Revisit trigger: horizontal scaling (Epic 7). No code changes.
+Next step: Task 0.4 (prove CI in GitHub Actions).
+Human decisions needed: None.
+```
+
+```text
+Date: 2026-07-04
+Agent: opencode
+Task: 0.1 — Rewrite PRODUCTION_READINESS.md to match delivered reality
+Files changed: docs/PRODUCTION_READINESS.md (complete rewrite), PROJECT_STATE.md, docs/V6_TASK_LIST.md (checkboxes)
+Tests run: npm run check (pass), test:all (95/95 pass)
+Result: PASS. Document now inventories delivered M0–M5 capabilities with 16 test-file references and adversarial probe citations. Gap table maps G1–G12 to V6 epics. "Still Required" section scoped to genuine remainder. V6 readiness definitions included (Demo GO, Investor GO after 0/1/3/6, Production NO-GO).
+Next step: Task 0.3 (ADR-010 rate limiting).
+Human decisions needed: None for unblocked tasks.
+```
 
 ```text
 Date: 2026-07-04

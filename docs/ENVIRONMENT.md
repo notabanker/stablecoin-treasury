@@ -44,6 +44,13 @@
 - The same canonical client IP feeds request context (`ctx.clientIp`), the general/state API rate
   limiters, and the login rate limiter, so per-client buckets stay consistent behind a proxy.
 - `GET /health` bypasses API rate limiting so orchestrator health checks never consume tokens.
+- **Rate limiters are per-process, in-memory only.** The token buckets and login lockout
+  counters live in each service instance's `Map` and are not shared across replicas. A
+  service restart clears all rate-limit state. This is acceptable while each service runs
+  as a single instance (the current pilot deployment model). If horizontal scaling is
+  introduced, rate limiting must move to a shared backend (Redis or equivalent) —
+  see `docs/adr/ADR-010-single-process-rate-limiting.md` for the decision and its
+  revisit triggers.
 
 ## Login Audit Tenant Attribution
 
