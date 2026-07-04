@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DATABASE_ADMIN_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+      PGPASSWORD: postgres
     services:
       postgres:
         image: postgres:16
