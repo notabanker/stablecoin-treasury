@@ -285,8 +285,9 @@ test("cookie-authenticated POST /api/payments with null csrf_token returns 403",
   assert.ok(sessionCookie);
 
   // Null the csrf_token directly in the DB to simulate a legacy session
+  // Use the stack's credentialed URL (required for CI environments with SCRAM auth)
   const pg = await import("pg");
-  const client = new pg.Client({ connectionString: `postgres://127.0.0.1:5432/${stack.databaseName}` });
+  const client = new pg.Client({ connectionString: stack._env.DATABASE_URL });
   await client.connect();
   await client.query("UPDATE identity.sessions SET csrf_token = NULL WHERE token = $1", [sessionCookie]);
   await client.end();
@@ -320,8 +321,9 @@ test("failed login for known tenant-2 email writes audit event under tenant 2", 
   });
 
   // Check audit events are written under tenant 2
+  // Use the stack's credentialed URL (required for CI environments with SCRAM auth)
   const pg = await import("pg");
-  const client = new pg.Client({ connectionString: `postgres://127.0.0.1:5432/${stack.databaseName}` });
+  const client = new pg.Client({ connectionString: stack._env.DATABASE_URL });
   await client.connect();
   const { rows } = await client.query(
     "SELECT * FROM operations.audit_events WHERE action = 'Login failed' AND actor LIKE $1 ORDER BY at DESC LIMIT 1",
@@ -354,8 +356,9 @@ test("lockout for known tenant-2 email writes Login lockout audit event under te
   const locked = await attempt(); // rejected by lockout → writes Login lockout audit row
   assert.equal(locked.status, 429);
 
+  // Use the stack's credentialed URL (required for CI environments with SCRAM auth)
   const pg = await import("pg");
-  const client = new pg.Client({ connectionString: `postgres://127.0.0.1:5432/${stack.databaseName}` });
+  const client = new pg.Client({ connectionString: stack._env.DATABASE_URL });
   await client.connect();
   const { rows } = await client.query(
     "SELECT * FROM operations.audit_events WHERE action = 'Login lockout' AND actor LIKE $1 ORDER BY at DESC LIMIT 1",
@@ -384,8 +387,9 @@ test("failed login for unknown email writes audit event under the default platfo
   });
   assert.equal(res.status, 401, "unknown email must return the same 401 as a wrong password");
 
+  // Use the stack's credentialed URL (required for CI environments with SCRAM auth)
   const pg = await import("pg");
-  const client = new pg.Client({ connectionString: `postgres://127.0.0.1:5432/${stack.databaseName}` });
+  const client = new pg.Client({ connectionString: stack._env.DATABASE_URL });
   await client.connect();
   const { rows } = await client.query(
     "SELECT * FROM operations.audit_events WHERE action = 'Login failed' AND actor LIKE $1 ORDER BY at DESC LIMIT 1",
