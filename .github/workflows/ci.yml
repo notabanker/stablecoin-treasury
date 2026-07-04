@@ -11,6 +11,8 @@ jobs:
     env:
       DATABASE_ADMIN_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
       PGPASSWORD: postgres
+      DB_POOL_MAX: "2"
+      TEST_STACK_READY_TIMEOUT_MS: "90000"
     services:
       postgres:
         image: postgres:16
