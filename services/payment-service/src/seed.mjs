@@ -7,6 +7,8 @@ export async function reseedPayments() {
   await withTransaction("payment", async (client) => {
     await client.query("DELETE FROM payment.idempotency_keys WHERE tenant_id = $1", [DEFAULT_TENANT_ID]);
     await client.query("DELETE FROM payment.payment_events WHERE tenant_id = $1", [DEFAULT_TENANT_ID]);
+    // Approval rows reference payments (FK) and must go first or the payments delete fails.
+    await client.query("DELETE FROM payment.payment_approvals WHERE tenant_id = $1", [DEFAULT_TENANT_ID]);
     await client.query("DELETE FROM payment.payments WHERE tenant_id = $1", [DEFAULT_TENANT_ID]);
     // Reset the reference sequence so a fresh demo run produces the same seeded-looking
     // references as before; RESTART is safe here because this only runs on /reset, never
@@ -39,6 +41,17 @@ export async function reseedPayments() {
           payment.settledAt || null
         ]
       );
+      // Seeded approval counts need matching approval rows or the approvals-integrity
+      // invariant (distinct approval rows >= approvals count) breaks on every demo reset.
+      // Mirrors the migration 0031 backfill marker pattern.
+      for (let i = 1; i <= (payment.approvals || 0); i += 1) {
+        await client.query(
+          `INSERT INTO payment.payment_approvals (tenant_id, payment_id, approver_id, approver_display)
+           VALUES ($1, $2, $3, 'Seeded demo approval')
+           ON CONFLICT (payment_id, approver_id) DO NOTHING`,
+          [DEFAULT_TENANT_ID, payment.id, `seed:demo:${i}`]
+        );
+      }
     }
-  });
+  }, { tenantId: DEFAULT_TENANT_ID });
 }

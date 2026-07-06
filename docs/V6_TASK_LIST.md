@@ -94,11 +94,11 @@ Unblocked without any approval: Tasks 0.1, 0.3, 0.4, Epic 4 (except 4.3), Epic 6
 - Gate: none (needs repo push access — flag if the remote isn't configured)
 - Components: `.github/workflows/ci.yml`, `README.md`
 - Subtasks:
-  - [ ] Verify the workflow matches local harness assumptions: Node >= 20, Postgres service container reachable as the admin URL the test helpers expect (`DATABASE_ADMIN_URL` / `postgres://127.0.0.1:5432/postgres`), migrations applied before integration tests.
-  - [ ] Push a branch; iterate until the full pipeline (check, unit, integration, concurrency) is green remotely.
-  - [ ] Record the green run link in README (badge or note); remove the "CI untested" risk row from `docs/V5_COMPLETION_REPORT.md`.
+  - [x] Verify the workflow matches local harness assumptions: Node >= 20, Postgres service container reachable as the admin URL the test helpers expect (`DATABASE_ADMIN_URL` / `postgres://127.0.0.1:5432/postgres`), migrations applied before integration tests.
+  - [x] Push a branch; iterate until the full pipeline (check, unit, integration, concurrency) is green remotely.
+  - [x] Record the green run link in README (badge or note); remove the "CI untested" risk row from `docs/V5_COMPLETION_REPORT.md`.
 - Acceptance Criteria:
-  - [ ] A linked green Actions run executing all four test stages.
+  - [x] A linked green Actions run executing all four test stages.
 - Tests: the CI run is the test.
 - Definition of Done: merge-blocking CI is a demonstrated fact.
 
@@ -243,13 +243,13 @@ full suite green after each step.
 - Gate: A2
 - Components: migrations per schema, `packages/shared/db.mjs`
 - Subtasks:
-  - [ ] `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` + `CREATE POLICY tenant_isolation ... USING (tenant_id = current_setting('app.tenant_id', true)::uuid)` on every tenant-scoped table, schema by schema.
-  - [ ] `db.mjs`: every query/transaction sets `app.tenant_id` from verified request context (`SET LOCAL` inside transactions; wrap bare queries in transactions where needed).
-  - [ ] Workers that legitimately operate across tenants (relay poll, job claim, watchdog): decide explicitly — either `BYPASSRLS` on `svc_relay`/`svc_job` (documented in the migration and ENVIRONMENT.md) or per-tenant iteration. Recommendation: BYPASSRLS for the two worker roles only; domain services never.
-  - [ ] Interaction checks: `SELECT ... FOR UPDATE` under RLS, the deferred balanced-ledger trigger, and `ON CONFLICT` idempotency inserts — cover each with an explicit test before moving to the next schema.
+  - [x] `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` + `CREATE POLICY tenant_isolation ... USING (tenant_id = current_setting('app.tenant_id', true)::uuid)` on every tenant-scoped table, schema by schema.
+  - [x] `db.mjs`: every query/transaction sets `app.tenant_id` from verified request context (`SET LOCAL` inside transactions; wrap bare queries in transactions where needed).
+  - [x] Workers that legitimately operate across tenants (relay poll, job claim, watchdog): decide explicitly — either `BYPASSRLS` on `svc_relay`/`svc_job` (documented in the migration and ENVIRONMENT.md) or per-tenant iteration. Recommendation: BYPASSRLS for the two worker roles only; domain services never.
+  - [x] Interaction checks: `SELECT ... FOR UPDATE` under RLS, the deferred balanced-ledger trigger, and `ON CONFLICT` idempotency inserts — cover each with an explicit test before moving to the next schema.
 - Acceptance Criteria:
-  - [ ] A deliberately WHERE-less `SELECT` executed as a domain service role with tenant 1 context returns zero tenant-2 rows.
-  - [ ] Full suite + concurrency suite green after every schema's migration.
+  - [x] A deliberately WHERE-less `SELECT` executed as a domain service role with tenant 1 context returns zero tenant-2 rows.
+  - [x] Full suite + concurrency suite green after every schema's migration.
 - Tests: RLS probe test (raw SQL through the service pool); existing cross-tenant suite as net.
 - Definition of Done: tenant isolation holds even against application-layer query bugs.
 
@@ -283,14 +283,14 @@ full suite green after each step.
 - Gate: **A3**
 - Components: `db/migrations/00xx_audit_hash_chain.sql`, `services/operations-service/src/index.mjs` (`/audit` insert), `packages/shared/auth.mjs` (`emitSecurityAudit`)
 - Subtasks:
-  - [ ] Add `prev_hash TEXT` and `row_hash TEXT` to `operations.audit_events`; chain is **per tenant** (tenant chains stay independent and exportable).
-  - [ ] Canonical hash material: `sha256(tenant_id|id|actor|action|object|detail|at|prev_hash)` over a documented canonical serialization — write the spec in the migration comment and a shared helper used by **both** insert paths.
-  - [ ] Serialize chain appends per tenant with `pg_advisory_xact_lock(hashtext(tenant_id::text))` inside the insert transaction to prevent prev_hash races under concurrency.
-  - [ ] Migration backfills the chain over existing rows ordered by `(at, id)` per tenant.
-  - [ ] Keep `emitSecurityAudit`'s never-block-the-operation property: hash failure logs loudly but does not fail login/logout (document the trade-off — a dropped audit row is itself detectable as a chain gap only if inserts fail closed; state the chosen semantics explicitly).
+  - [x] Add `prev_hash TEXT` and `row_hash TEXT` to `operations.audit_events`; chain is **per tenant** (tenant chains stay independent and exportable).
+  - [x] Canonical hash material: `sha256(tenant_id|id|actor|action|object|detail|at|prev_hash)` over a documented canonical serialization — write the spec in the migration comment and a shared helper used by **both** insert paths.
+  - [x] Serialize chain appends per tenant with `pg_advisory_xact_lock(hashtext(tenant_id::text))` inside the insert transaction to prevent prev_hash races under concurrency.
+  - [x] Migration backfills the chain over existing rows ordered by `(at, id)` per tenant.
+  - [x] Keep `emitSecurityAudit`'s never-block-the-operation property: hash failure logs loudly but does not fail login/logout (document the trade-off — a dropped audit row is itself detectable as a chain gap only if inserts fail closed; state the chosen semantics explicitly).
 - Acceptance Criteria:
-  - [ ] Concurrent audit inserts (N parallel) produce a valid unbroken chain.
-  - [ ] Both insert paths (operations `/audit`, gateway `emitSecurityAudit`) produce chain-valid rows.
+  - [x] Concurrent audit inserts (N parallel) produce a valid unbroken chain.
+  - [x] Both insert paths (operations `/audit`, gateway `emitSecurityAudit`) produce chain-valid rows.
 - Tests: concurrency chain test; unit test for canonical serialization stability.
 - Definition of Done: every audit row commits to its predecessor.
 
@@ -303,13 +303,13 @@ full suite green after each step.
 - Gate: A3
 - Components: new `scripts/verify-audit-chain.mjs`, job worker (new job type), `docs/RUNBOOKS.md`, `docs/RELEASE_CHECKLIST.md`
 - Subtasks:
-  - [ ] `scripts/verify-audit-chain.mjs`: walks each tenant chain, exits non-zero naming the first broken row; runnable standalone against `DATABASE_URL`.
-  - [ ] Durable job `audit-chain-verify` (nightly via `run_at` rescheduling) reusing the same verification module; on break: insert an operations alert (type `audit_chain_break`).
-  - [ ] Test: corrupt one row's `detail` in a scratch DB → verifier detects, names the row; job path produces the alert.
-  - [ ] Runbook entry: meaning of a break, damage bounding (last-valid row), evidence handling, escalation.
-  - [ ] Add verifier to the standard verification loop and release checklist.
+  - [x] `scripts/verify-audit-chain.mjs`: walks each tenant chain, exits non-zero naming the first broken row; runnable standalone against `DATABASE_URL`.
+  - [x] Durable job `audit-chain-verify` (nightly via `run_at` rescheduling) reusing the same verification module; on break: insert an operations alert (type `audit_chain_break`).
+  - [x] Test: corrupt one row's `detail` in a scratch DB → verifier detects, names the row; job path produces the alert.
+  - [x] Runbook entry: meaning of a break, damage bounding (last-valid row), evidence handling, escalation.
+  - [x] Add verifier to the standard verification loop and release checklist.
 - Acceptance Criteria:
-  - [ ] Verifier exit 0 on healthy DB; non-zero + row identification on corrupted scratch DB; alert row created by the job path.
+  - [x] Verifier exit 0 on healthy DB; non-zero + row identification on corrupted scratch DB; alert row created by the job path.
 - Definition of Done: tampering is detected within one job interval, with an operator playbook.
 
 ---
@@ -325,10 +325,10 @@ full suite green after each step.
 - Gate: none
 - Components: `packages/shared/auth.mjs`, `services/api-gateway/src/index.mjs`, `apps/web/main.js`, `db/migrations/` (idle-timeout column if needed), `docs/ENVIRONMENT.md`
 - Subtasks:
-  - [ ] `__Host-session` / `__Host-csrf` cookie names when `SESSION_COOKIE_SECURE=true` (prefix requires `Secure`, `Path=/`, no `Domain` — all already true). Cookie parsing (`extractToken`, frontend `document.cookie` read) accepts both names; plain names remain for non-secure local dev. Tests cover both modes.
-  - [ ] Session rotation: successful login destroys any session presented in the request cookie before issuing the new one (prevents fixation).
-  - [ ] Idle timeout: sliding `expires_at` bump on `validateSession` (bump at most once per minute to avoid write amplification) with an absolute cap from session creation (`SESSION_IDLE_TTL_MINUTES`, `SESSION_ABSOLUTE_TTL_HOURS`; defaults preserve current 24 h behavior). Uses existing `expires_at` + `created_at`; add `created_at` column only if missing.
-  - [ ] Logout response sets both cookies with `Max-Age=0` (today only the DB row is destroyed; the stale cookie lingers client-side).
+  - [x] `__Host-session` / `__Host-csrf` cookie names when `SESSION_COOKIE_SECURE=true` (prefix requires `Secure`, `Path=/`, no `Domain` — all already true). Cookie parsing (`extractToken`, frontend `document.cookie` read) accepts both names; plain names remain for non-secure local dev. Tests cover both modes.
+  - [x] Session rotation: successful login destroys any session presented in the request cookie before issuing the new one (prevents fixation).
+  - [x] Idle timeout: sliding `expires_at` bump on `validateSession` (bump at most once per minute to avoid write amplification) with an absolute cap from session creation (`SESSION_IDLE_TTL_MINUTES`, `SESSION_ABSOLUTE_TTL_HOURS`; defaults preserve current 24 h behavior). Uses existing `expires_at` + `created_at`.
+  - [x] Logout response sets both cookies with `Max-Age=0` (today only the DB row is destroyed; the stale cookie lingers client-side).
   - [ ] Document all new env vars in `docs/ENVIRONMENT.md`.
 - Acceptance Criteria:
   - [ ] Login with a valid old session cookie yields a different session token and the old one is dead.
@@ -346,10 +346,10 @@ full suite green after each step.
 - Gate: none
 - Components: `packages/shared/http.mjs` (`setBaseHeaders` / `serveStatic`)
 - Subtasks:
-  - [ ] CSP on gateway HTML responses: `default-src 'self'` (frontend is dependency-free — verify `apps/web/index.html` has no inline script/style first; if inline styles exist, decide hash-based allowance over `unsafe-inline`).
-  - [ ] `frame-ancestors 'none'` (CSP) + `X-Frame-Options: DENY`.
-  - [ ] HSTS documented as ingress duty (not set by the app; note in ENVIRONMENT.md).
-  - [ ] Browser check: UI fully functional with CSP active, zero console violations.
+  - [x] CSP on gateway HTML responses: `default-src 'self'` (frontend is dependency-free — verify `apps/web/index.html` has no inline script/style first; if inline styles exist, decide hash-based allowance over `unsafe-inline`).
+  - [x] `frame-ancestors 'none'` (CSP) + `X-Frame-Options: DENY`.
+  - [x] HSTS documented as ingress duty (not set by the app; note in ENVIRONMENT.md).
+  - [x] Browser check: UI fully functional with CSP active, zero console violations.
 - Acceptance Criteria:
   - [ ] Headers present on `/` responses; UI renders and operates cleanly.
 - Tests: integration assertion on response headers; browser check in the loop.
@@ -402,14 +402,14 @@ full suite green after each step.
 - Gate: A5
 - Components: `db/migrations/00xx_provider_statements.sql`, `services/reconciliation-service`, new `scripts/ingest-statement.mjs`, `tests/integration/`
 - Subtasks:
-  - [ ] `reconciliation.provider_statements (tenant_id, provider_id, external_id UNIQUE per provider, period, received_at)` + `statement_lines (statement_id FK, provider_ref, amount NUMERIC, asset, occurred_at, raw JSONB)`.
-  - [ ] Internal ingestion endpoint (internal-auth protected) + file-drop script for JSON statements.
-  - [ ] Matcher (durable job): match lines by `provider_ref` first, then amount+date+wallet heuristic with recorded confidence; unmatched → exceptions with reason category (`missing_ours`, `missing_theirs`, `amount_mismatch`, `fee_mismatch`, `duplicate`).
-  - [ ] `SimulatedCustodyAdapter` emits a statement line on settlement so the E2E path (settle → ingest → match) runs in tests without a partner.
-  - [ ] Exception lifecycle reuses the existing resolve flow; aging from timestamps (existing pattern).
+  - [x] `reconciliation.provider_statements (tenant_id, provider_id, external_id UNIQUE per provider, period, received_at)` + `statement_lines (statement_id FK, provider_ref, amount NUMERIC, asset, occurred_at, raw JSONB)`.
+  - [x] Internal ingestion endpoint (internal-auth protected) + file-drop script for JSON statements.
+  - [x] Matcher (durable job): match lines by `provider_ref` first, then amount+date+wallet heuristic with recorded confidence; unmatched → exceptions with reason category (`missing_ours`, `missing_theirs`, `amount_mismatch`, `fee_mismatch`, `duplicate`).
+  - [x] `SimulatedCustodyAdapter` emits a statement line on settlement so the E2E path (settle → ingest → match) runs in tests without a partner.
+  - [x] Exception lifecycle reuses the existing resolve flow; aging from timestamps (existing pattern).
 - Acceptance Criteria:
-  - [ ] E2E test: settled payment + ingested statement → matched row; each mismatch category → correct exception.
-  - [ ] Duplicate statement ingestion (same external_id) is idempotent.
+  - [x] E2E test: settled payment + ingested statement → matched row; each mismatch category → correct exception.
+  - [x] Duplicate statement ingestion (same external_id) is idempotent.
 - Tests: matcher unit tests per category; ingestion idempotency; E2E integration.
 - Definition of Done: reconciliation compares us against a provider's view, not against ourselves.
 
@@ -437,11 +437,11 @@ full suite green after each step.
 - Gate: none
 - Components: `services/relay-worker`, `services/job-worker`, `services/payment-service` (`/metrics`), `packages/shared/http.mjs`
 - Subtasks:
-  - [ ] Relay `/metrics`: outbox lag (age of oldest unpublished event, seconds), unpublished count, delivery failure count.
-  - [ ] Job worker `/metrics`: queue depth, dead-letter count, oldest pending job age (extends existing claimed/completed/failed counters).
-  - [ ] Payment `/metrics`: payments per state with max time-in-state, saga step failure counts (from `payment_execution_attempts`), stuck-`Executing` count over threshold.
-  - [ ] Gateway `/metrics`: webhook signature-failure count; circuit-breaker states per provider (after 5.1; degrade gracefully if 5.1 not landed).
-  - [ ] Metric DB queries must be cheap (indexed) and never block request handling; compute on scrape with a short cache.
+  - [x] Relay `/metrics`: outbox lag (age of oldest unpublished event), unpublished count, delivery failure count.
+  - [x] Job worker `/metrics`: queue depth, dead-letter count, oldest pending job age (extends existing claimed/completed/failed counters).
+  - [x] Payment `/metrics`: payments per state with max time-in-state, saga step failure counts (from `payment_execution_attempts`), stuck-`Executing` count over threshold.
+  - [x] Gateway `/metrics`: webhook signature-failure count; circuit-breaker states per provider (after 5.1; degrade gracefully if 5.1 not landed).
+  - [x] Metric DB queries must be cheap (indexed) and never block request handling; compute on scrape with a short cache.
 - Acceptance Criteria:
   - [ ] Each metric moves correctly under an integration test that manufactures its condition (e.g. halt relay → outbox lag grows).
 - Tests: integration assertions on `/metrics` JSON after induced conditions.
@@ -456,14 +456,14 @@ full suite green after each step.
 - Gate: none
 - Components: job worker (new job type `ops-watchdog`), `services/operations-service` (alerts), `docs/RUNBOOKS.md`, `docs/ENVIRONMENT.md`
 - Subtasks:
-  - [ ] Durable job `ops-watchdog` every `WATCHDOG_INTERVAL_MS` (rescheduling via `run_at`): evaluates stuck `Executing` payments (> `WATCHDOG_STUCK_EXECUTING_MS`), outbox lag > threshold, DLQ > 0, oldest pending job age > threshold, audit chain break (once 3.2 lands).
-  - [ ] Alert dedupe: one **open** alert per (type, subject); condition clearing resolves the alert; no alert storms on repeated evaluation.
-  - [ ] Alert rows flow through the existing operations alerts path so the UI panel and audit trail pick them up unchanged.
+  - [x] Durable job `ops-watchdog` every `WATCHDOG_INTERVAL_MS` (rescheduling via `run_at`): evaluates stuck `Executing` payments (> `WATCHDOG_STUCK_EXECUTING_MS`), outbox lag > threshold, DLQ > 0, oldest pending job age > threshold, audit chain break (once 3.2 lands).
+  - [x] Alert dedupe: one **open** alert per (type, subject); condition clearing resolves the alert; no alert storms on repeated evaluation.
+  - [x] Alert rows flow through the existing operations alerts path so the UI panel and audit trail pick them up unchanged.
   - [ ] Runbook entry per alert type with the operator action (repair endpoint, relay restart, DLQ drain — reference existing `docs/RUNBOOKS.md` procedures).
   - [ ] Env vars documented; watchdog disabled cleanly when interval unset in tests that don't want it.
 - Acceptance Criteria:
-  - [ ] Integration: manufacture a stuck `Executing` payment → alert appears within one interval → repair → alert resolves.
-  - [ ] Repeated evaluation of a persisting condition yields exactly one open alert.
+  - [x] Integration: manufacture a stuck `Executing` payment → alert appears within one interval → repair → alert resolves.
+  - [x] Repeated evaluation of a persisting condition yields exactly one open alert.
 - Tests: integration with short intervals via `extraEnv`.
 - Definition of Done: the platform notices its own failure modes before a user does.
 
@@ -476,10 +476,10 @@ full suite green after each step.
 - Gate: none
 - Components: `tests/integration/` (new test using `stack.mjs` captured child logs)
 - Subtasks:
-  - [ ] Run a full lifecycle on an auth-required stack: login, payment create/approve/execute, webhook delivery, logout.
-  - [ ] Collect all captured child stdout/stderr (extend `stack.mjs` log capture window if 80 lines is too small — make the cap configurable via option).
-  - [ ] Assert zero occurrences of: the session token value, csrf token value, the password, `INTERNAL_SERVICE_TOKEN` value, webhook secret value.
-  - [ ] Add the probe to `docs/RELEASE_CHECKLIST.md`.
+  - [x] Run a full lifecycle on an auth-required stack: login, payment create/approve/execute, webhook delivery, logout.
+  - [x] Collect all captured child stdout/stderr (extend `stack.mjs` log capture window if 80 lines is too small — make the cap configurable via option).
+  - [x] Assert zero occurrences of: the session token value, csrf token value, the password, `INTERNAL_SERVICE_TOKEN` value, webhook secret value.
+  - [x] Add the probe to `docs/RELEASE_CHECKLIST.md`.
 - Acceptance Criteria:
   - [ ] Probe passes; deliberately logging a token in a scratch branch makes it fail.
 - Definition of Done: log discipline is enforced by a test, not a convention.
@@ -529,11 +529,11 @@ full suite green after each step.
 - Loop (unchanged from V5): `npm run check` → `npm run test:all` → prod-config gate → `npm run migrate` + `npm run dev` + `/health` + `/ready` + `npm run smoke` → DB invariants → browser/UI check → docs reconciliation → PROJECT_STATE.md session log.
 - V6 invariant-query additions (land with their epics):
   - [ ] Approvals integrity (Task 1.5): `approval_rows_lt_count` → 0.
-  - [ ] Audit chain: `scripts/verify-audit-chain.mjs` exit 0 (Task 3.2).
+  - [x] Audit chain: `scripts/verify-audit-chain.mjs` exit 0 (Task 3.2).
 - V6 adversarial-probe additions to `docs/RELEASE_CHECKLIST.md` (land with their epics):
   - [ ] Same-user double approval → `409`; creator self-approval → `403`; forged acting-user header → `401`.
-  - [ ] Cross-schema SELECT under a service role → denied; WHERE-less query under RLS → zero foreign-tenant rows.
-  - [ ] Corrupted audit row → detected by verifier; alert row created.
+  - [x] Cross-schema SELECT under a service role → denied; WHERE-less query under RLS → zero foreign-tenant rows.
+  - [x] Corrupted audit row → detected by verifier; alert row created.
   - [ ] Stuck `Executing` payment → alert within one watchdog interval; resolves after repair.
   - [ ] Full-lifecycle log grep for secrets → zero hits.
   - [ ] `__Host-` cookies present in secure mode; logout clears cookies; fixated session rotated on login.

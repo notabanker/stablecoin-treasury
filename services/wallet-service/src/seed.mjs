@@ -64,5 +64,5 @@ export async function reseedWallets() {
         ]
       });
     }
-  });
+  }, { tenantId: DEFAULT_TENANT_ID });
 }

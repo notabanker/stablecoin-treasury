@@ -1,10 +1,12 @@
 import { createSeedData } from "../../../packages/shared/data.mjs";
-import { query } from "../../../packages/shared/db.mjs";
+import { runWithTenant, query } from "../../../packages/shared/db.mjs";
 import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
 
 export async function reseedPolicy() {
   const { policies } = createSeedData();
-  await query(
+  // Explicit tenant context so the RLS WITH CHECK accepts the seeded tenant-1 row even
+  // when reseeding runs outside a request (boot) or under a different request tenant.
+  await runWithTenant(DEFAULT_TENANT_ID, () => query(
     "policy",
     `INSERT INTO policy.policies (tenant_id, approval_threshold, second_approval_threshold, hard_transfer_limit, concentration_limit, allowed_assets, allowed_providers, require_screening)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -27,5 +29,5 @@ export async function reseedPolicy() {
       policies.allowedProviders,
       policies.requireScreening
     ]
-  );
+  ));
 }

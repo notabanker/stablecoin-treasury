@@ -280,7 +280,7 @@ async function request(path, options = {}, controls = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   // CSRF double-submit: read the token from the readable csrf cookie and send it as a header.
-  const csrfToken = document.cookie.split("; ").find((c) => c.startsWith("csrf="))?.split("=")[1] || "";
+  const csrfToken = document.cookie.split("; ").find((c) => c.startsWith("__Host-csrf=") || c.startsWith("csrf="))?.split("=")[1] || "";
   const isMutation = options.method && options.method !== "GET" && options.method !== "HEAD";
   let response;
   try {

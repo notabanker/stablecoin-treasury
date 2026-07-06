@@ -1,3 +1,4 @@
+import { insertAuditEventChained } from "../../../packages/shared/audit.mjs";
 import { createSeedData } from "../../../packages/shared/data.mjs";
 import { withTransaction } from "../../../packages/shared/db.mjs";
 import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
@@ -5,6 +6,10 @@ import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
 export async function reseedOperations() {
   const { providers, alerts, audit } = createSeedData();
   await withTransaction("operations", async (client) => {
+    // Take the same advisory lock the audit insert path uses so the delete is
+    // serialized with any concurrent inserts — no chain gaps from reset races.
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1::text))", [DEFAULT_TENANT_ID]);
+
     await client.query("DELETE FROM operations.providers WHERE tenant_id = $1", [DEFAULT_TENANT_ID]);
     await client.query("DELETE FROM operations.alerts WHERE tenant_id = $1", [DEFAULT_TENANT_ID]);
     await client.query("DELETE FROM operations.audit_events WHERE tenant_id = $1", [DEFAULT_TENANT_ID]);
@@ -37,11 +42,9 @@ export async function reseedOperations() {
       );
     }
     for (const event of audit) {
-      await client.query(
-        `INSERT INTO operations.audit_events (id, tenant_id, actor, action, object, detail, at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [event.id, DEFAULT_TENANT_ID, event.actor, event.action, event.object, event.detail, event.at]
-      );
+      // Seed rows join the hash chain like any other event; the demo reset deletes the
+      // tenant's rows above, so the chain restarts cleanly at genesis.
+      await insertAuditEventChained(client, { ...event, tenantId: DEFAULT_TENANT_ID });
     }
-  });
+  }, { tenantId: DEFAULT_TENANT_ID });
 }

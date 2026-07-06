@@ -19,6 +19,7 @@ test("serviceRequest normalizes AbortError timeouts without mutating native erro
     (error) => {
       assert.equal(error.name, "AbortError");
       assert.equal(error.status, 504);
+      assert.equal(error.code, "upstream_timeout");
       assert.equal(error.body?.error, "upstream_timeout");
       return true;
     }

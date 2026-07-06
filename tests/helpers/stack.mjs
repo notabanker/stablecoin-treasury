@@ -68,7 +68,7 @@ async function dropDatabase(name) {
   }
 }
 
-export async function startStack({ verbose = false, extraEnv = {} } = {}) {
+export async function startStack({ verbose = false, extraEnv = {}, logCaptureMax = 80 } = {}) {
   const portBase = await allocatePortBase();
   const ports = {
     wallet: portBase + 1,
@@ -83,6 +83,31 @@ export async function startStack({ verbose = false, extraEnv = {} } = {}) {
     job: portBase + 9
   };
   const database = await createTestDatabase();
+
+  const serviceDbPassword = process.env.SERVICE_DB_PASSWORD || "service-dev-password";
+
+  // Map each service to its Postgres role.
+  const serviceRoles = {
+    wallet: "svc_wallet",
+    policy: "svc_policy",
+    compliance: "svc_compliance",
+    accounting: "svc_accounting",
+    reconciliation: "svc_reconciliation",
+    operations: "svc_operations",
+    payment: "svc_payment",
+    gateway: "svc_gateway",
+    relay: "svc_relay",
+    job: "svc_job"
+  };
+
+  // Build the admin URL parts.
+  const adminUrlObj = new URL(database.url);
+  const dbHost = adminUrlObj.hostname;
+  const dbPort = adminUrlObj.port || "5432";
+
+  function roleDbUrl(role) {
+    return `postgres://${role}:${serviceDbPassword}@${dbHost}:${dbPort}${adminUrlObj.pathname}`;
+  }
 
   const sharedEnv = {
     ...process.env,
@@ -102,16 +127,17 @@ export async function startStack({ verbose = false, extraEnv = {} } = {}) {
 
   const children = serviceDefs.map(([name, script, portEnvKey]) => {
     const logs = [];
+    const roleUrl = roleDbUrl(serviceRoles[name] || "svc_gateway");
     const child = spawn(process.execPath, [script], {
       cwd: root,
-      env: { ...sharedEnv, [portEnvKey]: String(ports[name]) },
+      env: { ...sharedEnv, [portEnvKey]: String(ports[name]), DATABASE_URL: roleUrl },
       stdio: ["ignore", verbose ? "inherit" : "pipe", verbose ? "inherit" : "pipe"]
     });
     if (!verbose) {
       const capture = (stream, chunk) => {
         const lines = chunk.toString("utf8").split(/\r?\n/).filter(Boolean);
         for (const line of lines) logs.push(`[${stream}] ${line}`);
-        if (logs.length > 80) logs.splice(0, logs.length - 80);
+        if (logs.length > logCaptureMax) logs.splice(0, logs.length - logCaptureMax);
       };
       child.stdout?.on("data", (chunk) => capture("stdout", chunk));
       child.stderr?.on("data", (chunk) => capture("stderr", chunk));

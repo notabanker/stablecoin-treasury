@@ -1,7 +1,8 @@
+import { insertAuditEventChained } from "../../../packages/shared/audit.mjs";
 import { createId } from "../../../packages/shared/data.mjs";
-import { query, withTransaction } from "../../../packages/shared/db.mjs";
+import { query, withTransaction, runWithTenant } from "../../../packages/shared/db.mjs";
 import { createJsonService, httpError, ok, route } from "../../../packages/shared/http.mjs";
-import { claimInboxEvent } from "../../../packages/shared/outbox.mjs";
+import { withInboxDedup } from "../../../packages/shared/outbox.mjs";
 import { DEFAULT_TENANT_ID, tenantIdFromHeaders } from "../../../packages/shared/tenant.mjs";
 import { validateProductionConfig } from "../../../packages/shared/config.mjs";
 import { reseedOperations } from "./seed.mjs";
@@ -10,7 +11,9 @@ const port = Number(process.env.PORT || 4107);
 const DB = "operations";
 
 validateProductionConfig("operations-service");
-await bootstrap();
+// Bootstrap runs outside any request: enter the default-tenant RLS context explicitly
+// so the seeded-data existence check does not fail closed (0 rows) and reseed every boot.
+await runWithTenant(DEFAULT_TENANT_ID, bootstrap);
 
 createJsonService({
   name: "operations-service",
@@ -45,7 +48,7 @@ createJsonService({
     route("GET", "/audit", async ({ headers }) => ok(await listAudit(tenantIdFromHeaders(headers)))),
     route("POST", "/audit", async ({ body, headers }) => {
       const tenantId = tenantIdFromHeaders(headers);
-      return ok(await withInboxDedup(headers, "operations", async (client) => {
+      return ok(await withInboxDedup(DB, headers, "operations", async (client) => {
         return appendAudit(body.actor || "System", body.action, body.object, body.detail, tenantId, client);
       }));
     }),
@@ -59,7 +62,7 @@ createJsonService({
         detail: body.detail || "",
         status: body.status || "Open"
       };
-      return ok(await withInboxDedup(headers, "operations", async (client) => insertAlert(alert, tenantId, client)));
+      return ok(await withInboxDedup(DB, headers, "operations", async (client) => insertAlert(alert, tenantId, client)));
     }),
     route("POST", "/incidents/simulate", async ({ headers }) => {
       const tenantId = tenantIdFromHeaders(headers);
@@ -153,26 +156,14 @@ async function insertAlert(alert, tenantId = DEFAULT_TENANT_ID, client = null) {
 
 async function appendAudit(actor, action, object, detail, tenantId = DEFAULT_TENANT_ID, client = null) {
   const event = { id: createId("aud"), at: new Date(), actor, action, object, detail: detail || "" };
-  const q = client || { query: (...args) => query(DB, ...args) };
-  await q.query(
-    "INSERT INTO operations.audit_events (id, tenant_id, actor, action, object, detail, at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-    [event.id, tenantId, actor, action, object, event.detail, event.at]
-  );
-  return toAuditShape(event);
-}
-
-async function withInboxDedup(headers, consumer, handler) {
-  const eventId = headers["x-event-id"];
-  if (!eventId) {
-    return handler();
+  // Chain-linked insert (V6 Epic 3): must run inside a transaction so the per-tenant
+  // advisory lock serializes concurrent appends.
+  if (client) {
+    await insertAuditEventChained(client, { ...event, tenantId });
+  } else {
+    await withTransaction(DB, (tx) => insertAuditEventChained(tx, { ...event, tenantId }));
   }
-  return withTransaction(DB, async (client) => {
-    const shouldProcess = await claimInboxEvent(client, eventId, consumer);
-    if (!shouldProcess) {
-      return { duplicate: true, eventId };
-    }
-    return handler(client);
-  });
+  return toAuditShape(event);
 }
 
 async function bootstrap() {

@@ -106,9 +106,13 @@ test("concurrent approvals cannot push a two-approval payment's count past its r
   const results = await Promise.all(
     Array.from({ length: 10 }, () => api(stack.baseUrl, `/payments/${create.data.payment.id}/approve`, { method: "POST" }))
   );
+  // V6 four-eyes: same approver concurrent approvals — exactly one succeeds (UNIQUE constraint).
+  // Additional concurrent calls return 409 already_approved. This is the new concurrency
+  // guarantee: even under N-way parallel approve calls, at most one approval row per approver.
   const ok = results.filter((r) => r.status === 200);
-  assert.ok(ok.length > 0);
-  const finalApprovals = ok[ok.length - 1].data.payment.approvals;
+  const conflicts = results.filter((r) => r.status === 409);
+  assert.ok(ok.length === 1, `expected exactly 1 success, got ${ok.length} successes and ${conflicts.length} conflicts`);
+  const finalApprovals = ok[0].data.payment.approvals;
   assert.ok(finalApprovals <= 2, `approvals must never exceed requiredApprovals (2), got ${finalApprovals}`);
 
   const state = await api(stack.baseUrl, "/state");

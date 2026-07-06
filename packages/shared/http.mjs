@@ -2,6 +2,8 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import { extname, join, normalize, sep } from "node:path";
 import { createServer } from "node:http";
 import { randomUUID, createHmac, timingSafeEqual } from "node:crypto";
+import { runWithTenant } from "./db.mjs";
+import { tenantIdFromHeaders } from "./tenant.mjs";
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
@@ -64,7 +66,7 @@ function startRateCleanup() {
   rateCleanupTimer.unref();
 }
 
-export function createJsonService({ name, port, routes, staticRoot, internalAuthRequired = false }) {
+export function createJsonService({ name, port, routes, staticRoot, internalAuthRequired = false, rateLimit = !internalAuthRequired, extraMetrics } = {}) {
   const host = process.env.HOST || "127.0.0.1";
   const metrics = createMetrics(name);
   let draining = false;
@@ -83,7 +85,11 @@ export function createJsonService({ name, port, routes, staticRoot, internalAuth
     try {
       const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
       if (url.pathname === "/metrics" && req.method === "GET") {
-        sendJson(res, 200, metrics.snapshot());
+        const snapshot = metrics.snapshot();
+        if (extraMetrics) {
+          Object.assign(snapshot, await extraMetrics());
+        }
+        sendJson(res, 200, snapshot);
         return;
       }
       if (draining && url.pathname !== "/health") {
@@ -95,13 +101,11 @@ export function createJsonService({ name, port, routes, staticRoot, internalAuth
 
       // Rate limiting: separate buckets for state reads vs general routes.
       // Bypass for health checks so they never consume rate-limit tokens.
-      if (url.pathname !== "/health") {
+      if (rateLimit && url.pathname !== "/health") {
         const isStateRoute = url.pathname === "/api/state";
         const bucketKey = isStateRoute ? "state" : "general";
-        const rateLimit = isStateRoute
-          ? STATE_RATE_MAX
-          : RATE_MAX;
-        const rateResult = checkRateLimit(req, Date.now(), RATE_WINDOW_MS, rateLimit, bucketKey);
+        const limit = isStateRoute ? STATE_RATE_MAX : RATE_MAX;
+        const rateResult = checkRateLimit(req, Date.now(), RATE_WINDOW_MS, limit, bucketKey);
         if (!rateResult.allowed) {
           res.setHeader("Retry-After", Math.ceil(rateResult.retryAfterMs / 1000));
           sendJson(res, 429, {
@@ -119,6 +123,21 @@ export function createJsonService({ name, port, routes, staticRoot, internalAuth
 
       if (route) {
         const body = await readJson(req);
+        // Extract acting user from the X-Acting-User header when present.
+        // In internal-auth mode, validateInternalAuth verifies the payload signature;
+        // in dev mode, the header is trusted as-is (dev ergonomics).
+        // Malformed JSON is caught here rather than throwing 500 after auth is bypassed.
+        const actingUserHeader = req.headers["x-acting-user"] || "";
+        let actingUser = null;
+        if (actingUserHeader) {
+          try {
+            actingUser = JSON.parse(actingUserHeader);
+          } catch {
+            // Malformed header: treat as absent. Don't throw — that would be an
+            // unauthenticated caller choosing our error status code.
+            actingUser = null;
+          }
+        }
         const context = {
           body,
           headers: req.headers,
@@ -127,9 +146,14 @@ export function createJsonService({ name, port, routes, staticRoot, internalAuth
           query: Object.fromEntries(url.searchParams),
           requestId,
           url,
-          clientIp: getClientIp(req)
+          clientIp: getClientIp(req),
+          actingUser
         };
-        const result = await route.handler(context);
+        // Enter the tenant context for RLS: db.mjs picks this up and sets the
+        // transaction-local app.tenant_id that row-level security policies check.
+        // Matches tenantIdFromHeaders semantics handlers already use for scoping
+        // (missing/invalid header falls back to the default tenant).
+        const result = await runWithTenant(tenantIdFromHeaders(req.headers), () => route.handler(context));
         // Route handlers can set cookies by returning a `cookies` array of Set-Cookie strings.
         if (result?.cookies?.length) {
           res.setHeader("Set-Cookie", [...result.cookies]);
@@ -215,14 +239,16 @@ export function httpError(status, message, code) {
 const INTERNAL_SERVICE_TOKEN = process.env.INTERNAL_SERVICE_TOKEN || "dev-internal-token";
 const INTERNAL_AUTH_REQUIRED = process.env.INTERNAL_AUTH_REQUIRED === "true";
 
-export function signInternalRequest(method, path, body) {
-  const payload = `${method}|${path}|${JSON.stringify(body || {})}`;
+export function signInternalRequest(method, path, body, actingUser = "") {
+  const actingUserStr = typeof actingUser === "string" ? actingUser : JSON.stringify(actingUser || {});
+  const payload = `${method}|${path}|${JSON.stringify(body || {})}|${actingUserStr}`;
   const signature = createHmac("sha256", INTERNAL_SERVICE_TOKEN).update(payload).digest("hex");
-  return { "X-Internal-Signature": signature };
+  return { "X-Internal-Signature": signature, "X-Acting-User": actingUserStr };
 }
 
-function verifyInternalRequest(method, path, body, signature) {
-  const payload = `${method}|${path}|${JSON.stringify(body || {})}`;
+function verifyInternalRequest(method, path, body, signature, actingUserHeader = "") {
+  const actingUserStr = actingUserHeader || "";
+  const payload = `${method}|${path}|${JSON.stringify(body || {})}|${actingUserStr}`;
   const expected = createHmac("sha256", INTERNAL_SERVICE_TOKEN).update(payload).digest("hex");
   const expectedBuf = Buffer.from(expected, "hex");
   const providedBuf = Buffer.from(String(signature || ""), "hex");
@@ -231,15 +257,23 @@ function verifyInternalRequest(method, path, body, signature) {
 
 export function validateInternalAuth(routeHandler, opts = {}) {
   return async (context) => {
-    if (!INTERNAL_AUTH_REQUIRED) return routeHandler(context);
+    if (!INTERNAL_AUTH_REQUIRED) {
+      // In dev mode, take acting user from header as-is (unsigned).
+      const actingUserHeader = context.headers["x-acting-user"] || "";
+      context.actingUser = actingUserHeader ? JSON.parse(actingUserHeader) : null;
+      return routeHandler(context);
+    }
     if (opts.public) return routeHandler(context);
 
     const sig = context.headers["x-internal-signature"] || "";
+    const actingUserHeader = context.headers["x-acting-user"] || "";
     const method = context.method || "GET";
     const path = context.url?.pathname || "/";
-    if (!verifyInternalRequest(method, path, context.body, sig)) {
+    if (!verifyInternalRequest(method, path, context.body, sig, actingUserHeader)) {
       throw httpError(401, "Internal authentication required", "internal_auth_required");
     }
+    // Expose verified acting user to downstream handlers.
+    context.actingUser = actingUserHeader ? JSON.parse(actingUserHeader) : null;
     return routeHandler(context);
   };
 }
@@ -356,6 +390,8 @@ function setBaseHeaders(res, requestId) {
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, OPTIONS");
   res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'");
   res.setHeader("X-Request-Id", requestId);
   // Trace propagation: pass the request-id as the trace-id for simplicity.
   // A production OTel SDK would replace this with proper traceparent header handling.

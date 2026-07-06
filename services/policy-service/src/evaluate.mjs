@@ -82,6 +82,10 @@ export function validatePolicy(policy) {
   if (policy.concentrationLimit <= 0 || policy.concentrationLimit > 1) {
     throw httpError(422, "concentrationLimit must be greater than 0 and no more than 1", "invalid_policy");
   }
+  // selfApprovalAllowed defaults to false; any truthy value is accepted
+  if (policy.selfApprovalAllowed !== undefined && typeof policy.selfApprovalAllowed !== "boolean") {
+    throw httpError(422, "selfApprovalAllowed must be a boolean if provided", "invalid_policy");
+  }
 }
 
 export function requiredApprovalsFor(amountEur, policies) {

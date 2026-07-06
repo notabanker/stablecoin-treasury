@@ -1,4 +1,4 @@
-import { query } from "../../../packages/shared/db.mjs";
+import { query, runWithTenant } from "../../../packages/shared/db.mjs";
 import { createJsonService, ok, route } from "../../../packages/shared/http.mjs";
 import { DEFAULT_TENANT_ID, tenantIdFromHeaders } from "../../../packages/shared/tenant.mjs";
 import { validateProductionConfig } from "../../../packages/shared/config.mjs";
@@ -9,7 +9,9 @@ const port = Number(process.env.PORT || 4102);
 const DB = "policy";
 
 validateProductionConfig("policy-service");
-await bootstrap();
+// Bootstrap runs outside any request: enter the default-tenant RLS context explicitly
+// so the seeded-data existence check does not fail closed (0 rows) and reseed every boot.
+await runWithTenant(DEFAULT_TENANT_ID, bootstrap);
 
 createJsonService({
   name: "policy-service",

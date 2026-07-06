@@ -23,5 +23,5 @@ export async function reseedCounterparties() {
         ]
       );
     }
-  });
+  }, { tenantId: DEFAULT_TENANT_ID });
 }

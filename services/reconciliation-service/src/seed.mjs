@@ -5,6 +5,10 @@ import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
 export async function reseedReconciliation() {
   const { reconciliation } = createSeedData();
   await withTransaction("reconciliation", async (client) => {
+    // FK order: statement lines reference statements; both go before the rows wipe so a
+    // demo reset never trips a foreign key (V6 lesson — see docs/V6_REMAINING_TASKS_INSTRUCTION.md).
+    await client.query("DELETE FROM reconciliation.statement_lines WHERE tenant_id = $1", [DEFAULT_TENANT_ID]);
+    await client.query("DELETE FROM reconciliation.provider_statements WHERE tenant_id = $1", [DEFAULT_TENANT_ID]);
     await client.query("DELETE FROM reconciliation.reconciliation_rows WHERE tenant_id = $1", [DEFAULT_TENANT_ID]);
     for (const row of reconciliation) {
       await client.query(
@@ -25,5 +29,5 @@ export async function reseedReconciliation() {
         ]
       );
     }
-  });
+  }, { tenantId: DEFAULT_TENANT_ID });
 }

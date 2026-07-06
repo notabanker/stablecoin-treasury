@@ -12,12 +12,44 @@ let running = true;
 
 validateProductionConfig("relay-worker");
 const metrics = { published: 0, failed: 0, noRoute: 0 };
+const startedAt = new Date().toISOString();
+
+// Money-path metrics cache: DB queries are run at most once per METRICS_CACHE_MS.
+const METRICS_CACHE_MS = 5000;
+let metricsCache = { timestamp: 0, unpublishedCount: 0, outboxLagMs: 0 };
+
+async function refreshMetricsCache() {
+  const now = Date.now();
+  if (now - metricsCache.timestamp < METRICS_CACHE_MS) return;
+  try {
+    const { rows } = await query(DB,
+      "SELECT COUNT(*)::int AS unpublished_count, COALESCE(EXTRACT(EPOCH FROM NOW() - MIN(created_at)) * 1000, 0)::float AS outbox_lag_ms FROM platform.outbox_events WHERE published_at IS NULL"
+    );
+    metricsCache = {
+      timestamp: now,
+      unpublishedCount: rows[0]?.unpublished_count ?? 0,
+      outboxLagMs: Math.round(rows[0]?.outbox_lag_ms ?? 0)
+    };
+  } catch {
+    // stale cache is better than a broken metrics endpoint
+  }
+}
 
 const healthPort = Number(process.env.PORT || 9101);
-const healthServer = createServer((req, res) => {
+const healthServer = createServer(async (req, res) => {
   res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
   if (req.url === "/metrics") {
-    res.end(JSON.stringify({ status: "ok", service: "relay-worker", ...metrics, queueDepth: 0 }));
+    await refreshMetricsCache();
+    res.end(JSON.stringify({
+      status: "ok",
+      service: "relay-worker",
+      startedAt,
+      published: metrics.published,
+      failed: metrics.failed,
+      noRoute: metrics.noRoute,
+      unpublishedCount: metricsCache.unpublishedCount,
+      outboxLagMs: metricsCache.outboxLagMs
+    }));
   } else {
     res.end(JSON.stringify({ status: "ok", service: "relay-worker" }));
   }
@@ -68,6 +100,7 @@ async function pollAndDispatch() {
       await servicePost(route.consumer, route.path, row.payload, {
         headers: { "X-Event-Id": row.id, "X-Event-Type": row.event_type },
         tenantId: row.tenant_id,
+        actingUser: { id: "system:worker", display: "System" },
         timeoutMs: Number(process.env.RELAY_DELIVERY_TIMEOUT_MS || 5000),
         requestId: `relay-${row.id}`
       });

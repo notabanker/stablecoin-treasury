@@ -1,4 +1,4 @@
-import { query } from "../../../packages/shared/db.mjs";
+import { query, runWithTenant } from "../../../packages/shared/db.mjs";
 import { createJsonService, httpError, ok, route } from "../../../packages/shared/http.mjs";
 import { DEFAULT_TENANT_ID, tenantIdFromHeaders } from "../../../packages/shared/tenant.mjs";
 import { validateProductionConfig } from "../../../packages/shared/config.mjs";
@@ -12,7 +12,9 @@ validateProductionConfig("compliance-service");
 // Top-level await: the HTTP listener (created below) must not accept traffic before the schema
 // has demo data, matching the old durable-store's "seed on first boot if the file doesn't exist"
 // behavior. ES modules support this at the top level, so the import itself blocks until ready.
-await bootstrap();
+// Bootstrap runs outside any request: enter the default-tenant RLS context explicitly
+// so the seeded-data existence check does not fail closed (0 rows) and reseed every boot.
+await runWithTenant(DEFAULT_TENANT_ID, bootstrap);
 
 createJsonService({
   name: "compliance-service",

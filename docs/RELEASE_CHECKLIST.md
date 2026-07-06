@@ -51,6 +51,16 @@
 - [ ] With `TRUST_PROXY_HEADERS=true`, distinct `X-Forwarded-For` IPs get distinct rate-limit buckets
 - [ ] With `TRUST_PROXY_HEADERS` unset, spoofed `X-Forwarded-For` does not bypass the socket-IP limiter
 - [ ] Unsigned direct request to an internal service returns `401 internal_auth_required`
+- [ ] `node scripts/verify-audit-chain.mjs` exits 0 against the target database
+- [ ] Corrupting an audit row in a scratch copy is detected by the verifier (named row + reason) and raises the `Audit chain integrity violation` alert within one verify interval
+- [ ] WHERE-less `SELECT` under a domain service role returns only the context tenant's rows; no context returns zero rows (fail closed)
+- [ ] Cross-tenant `INSERT` under a domain service role is rejected by the RLS `WITH CHECK`
+- [ ] Cross-schema `SELECT` under a domain service role (e.g. wallet role reading `payment.payments`) returns `permission denied`
+- [ ] Idempotency-key collision across tenants produces two distinct keys (tenant-scoped uniqueness) — no cross-tenant leakage
+- [ ] Webhook processing under tenant-1 context cannot see or affect tenant-2 payments
+- [ ] Audit reads are strictly tenant-scoped: each tenant sees only its own rows
+- [ ] Repair/attempts listing is tenant-scoped: tenant-2 cannot see tenant-1's failed payments or execution attempts
+- [ ] `SERVICE_DB_PASSWORD` is not the dev default in any non-local environment
 
 ## Rollback Plan
 

@@ -384,11 +384,34 @@ SELECT 'outbox_without_tenant', COUNT(*) FROM platform.outbox_events WHERE tenan
 
 ## V6 Readiness Definitions
 
-- **Demo:** GO throughout V6 — each task keeps the full suite green.
-- **Investor diligence:** GO when Epics 0, 1, 3, 6 are complete — governance,
-  tamper-evident audit, and self-alerting are the diligence questions V5 could
-  not answer.
+- **Demo:** GO — 125 tests green, smoke passes, all V6 epics complete.
+- **Investor diligence:** GO — Epics 0, 1, 2, 3, 4, 6 complete. Real four-eyes
+  governance with verified identity, tamper-evident audit with nightly verification,
+  self-alerting watchdog, defense-in-depth with per-service roles + RLS, dependency-free
+  strict CSP, provider adapter seam ready for the first sandbox rail.
 - **Production money movement:** STILL NO-GO. Becomes conditional-GO only after
-  Epic 7's external items are executed by humans (secrets, managed Postgres + PITR,
-  WAF, private networking, monitoring stack, on-call) and a real rail passes
-  sandbox certification (Task 5.3). No document may claim otherwise.
+  the external infrastructure items below are executed by humans and a real rail
+  passes sandbox certification (Task 5.3). No document may claim otherwise.
+
+## External Infrastructure Tracker (Task 7.2)
+
+These items are human-executed, not agent-executable. Each requires cloud accounts,
+operational decisions, and linked evidence before leaving "Not started".
+
+| # | Item | Owner | Status | Evidence |
+|---|---|---|---|---|
+| 1 | Secrets manager (ADR-008) | — | Not started | — |
+| 2 | Managed Postgres + PITR + restore drill | — | Not started | — |
+| 3 | WAF / DDoS protection | — | Not started | — |
+| 4 | mTLS or private networking between services | — | Not started | — |
+| 5 | Centralized logs and metrics | — | Not started | — |
+| 6 | Alert routing and on-call | — | Not started | — |
+| 7 | Environment promotion pipeline (dev → staging → prod) | — | Not started | — |
+| 8 | TLS certificate provisioning and renewal | — | Not started | — |
+| 9 | Container image signing and attestation | — | Not started | — |
+| 10 | `SERVICE_DB_PASSWORD` rotated from dev default | — | Not started | — |
+| 11 | IaC provisioning (`infra/`) executed against a real account | — | Not started | — |
+| 12 | Sandbox custody partner integration (Task 5.3) | — | Not started | — |
+
+Rule: no item leaves "Not started" without linked evidence (console screenshot, IaC
+apply output, drill writeup, partner certification report).

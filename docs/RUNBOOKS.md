@@ -112,6 +112,43 @@ ORDER BY t.name, p.status;
 
 **Remediation:** Cross-tenant access is prevented by application-layer tenant_id filtering. Postgres RLS planned for M4.
 
+## Audit Chain Break
+
+Alert: `Audit chain integrity violation` (raised by the nightly `audit-chain-verify` job;
+severity High). The alert detail names the failure reason, `chain_seq`, and event id.
+
+What the chain proves: every `operations.audit_events` row commits to its predecessor via
+`prev_hash`/`row_hash` (sha256, canonical SQL serialization — see migration 0032) with a
+gapless per-tenant `chain_seq`. A break means a recorded event was edited, relinked, or an
+interior row was deleted after the fact.
+
+Known limitations (do not over-claim):
+- Deleting the NEWEST rows of a tenant's chain (truncation) is not detectable without
+  external anchoring / WORM offload (planned, backlog 6.5).
+- The chain proves integrity of recorded events, not completeness: `emitSecurityAudit` is
+  fail-open by design (an audit insert failure never blocks login/logout) and logs
+  `security_audit_insert_failed` — watch for those in logs.
+
+Response:
+1. Reproduce and bound the damage:
+   `node scripts/verify-audit-chain.mjs` (uses `DATABASE_URL`) — the JSON output names the
+   first broken row: `{ id, tenantId, chainSeq, reason }`.
+   - `row_hash_mismatch` — that row's content was edited.
+   - `prev_hash_mismatch` — rows were relinked/reordered.
+   - `sequence_gap` / `missing_genesis` — interior rows were deleted.
+2. Everything before the named `chain_seq` in that tenant's chain is still proven intact;
+   treat that row and everything after as suspect.
+3. Preserve evidence before touching anything: `pg_dump --table=operations.audit_events`
+   plus the latest base backup for comparison (see Backup / Restore Quick Reference).
+4. This is a security incident, not an ops repair: DB-level tampering implies write access
+   to the database. Rotate DB credentials, review `pg_stat_activity`/connection logs, and
+   escalate. Do NOT "fix" the chain by recomputing hashes — that destroys the evidence.
+5. Expected false positive: none. Demo resets rebuild the tenant-1 chain atomically and
+   verify clean; a break is never routine.
+
+The alert closes automatically on the next verify cycle only if the chain verifies clean
+again (e.g. after a restore); it never closes while the break persists.
+
 ## DB Invariant Checks
 
 Run periodically:
@@ -129,6 +166,16 @@ HAVING SUM(CASE WHEN le.direction='debit' THEN le.amount ELSE -le.amount END) <>
 -- Null tenant_id in platform tables (must be 0)
 SELECT count(*) FROM platform.jobs WHERE tenant_id IS NULL;
 SELECT count(*) FROM platform.outbox_events WHERE tenant_id IS NULL;
+
+-- Approvals integrity (must be 0): no payment claims more approvals than it has rows for
+SELECT count(*) FROM payment.payments p
+WHERE p.approvals > (SELECT COUNT(DISTINCT approver_id)
+                     FROM payment.payment_approvals a WHERE a.payment_id = p.id);
+```
+
+Audit chain (must exit 0):
+```bash
+node scripts/verify-audit-chain.mjs
 ```
 
 ## Service Restart Procedure

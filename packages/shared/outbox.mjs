@@ -1,3 +1,4 @@
+import { withTransaction } from "./db.mjs";
 import { DEFAULT_TENANT_ID } from "./tenant.mjs";
 
 const OBOX = "platform";
@@ -34,4 +35,22 @@ export async function claimInboxEvent(client, eventId, consumer) {
     [eventId, consumer]
   );
   return rows.length > 0;
+}
+
+// Route-handler wrapper around claimInboxEvent: relay-delivered requests carry X-Event-Id;
+// duplicates return { duplicate: true } without repeating the side effect, and the handler
+// shares one transaction with the inbox claim. Direct (non-relayed) requests run the
+// handler without dedup. Consolidated from identical copies in the consumer services.
+export async function withInboxDedup(dbName, headers, consumer, handler) {
+  const eventId = headers["x-event-id"];
+  if (!eventId) {
+    return handler();
+  }
+  return withTransaction(dbName, async (client) => {
+    const shouldProcess = await claimInboxEvent(client, eventId, consumer);
+    if (!shouldProcess) {
+      return { duplicate: true, eventId };
+    }
+    return handler(client);
+  });
 }

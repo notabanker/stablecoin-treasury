@@ -1,9 +1,10 @@
 import { createServer } from "node:http";
+import { verifyAuditChain } from "../../../packages/shared/audit.mjs";
 import { query } from "../../../packages/shared/db.mjs";
 import { claimJobs, completeJob, failJob } from "../../../packages/shared/jobs.mjs";
 import { serviceGet, servicePost } from "../../../packages/shared/service-client.mjs";
 import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
-import { randomHex } from "../../../packages/shared/data.mjs";
+import { resolveAdapter, withBreaker } from "../../../packages/shared/adapters/custody.mjs";
 import { validateProductionConfig } from "../../../packages/shared/config.mjs";
 
 const WORKER_ID = `worker-${Math.random().toString(36).slice(2, 10)}`;
@@ -13,13 +14,52 @@ let running = true;
 const startedAt = new Date().toISOString();
 const metrics = { claimed: 0, completed: 0, failed: 0, deadLettered: 0, noHandler: 0 };
 
+// Money-path metrics cache: DB queries are run at most once per METRICS_CACHE_MS.
+const METRICS_CACHE_MS = 5000;
+let metricsCache = { timestamp: 0, queueDepth: 0, deadLetterCount: 0, oldestPendingJobAgeMs: 0 };
+
+async function refreshMetricsCache() {
+  const now = Date.now();
+  if (now - metricsCache.timestamp < METRICS_CACHE_MS) return;
+  try {
+    const { rows } = await query("platform",
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'pending')::int AS queue_depth,
+         COUNT(*) FILTER (WHERE status = 'dead_lettered')::int AS dead_letter_count,
+         COALESCE(EXTRACT(EPOCH FROM NOW() - MIN(created_at) FILTER (WHERE status = 'pending')) * 1000, 0)::float AS oldest_pending_job_age_ms
+       FROM platform.jobs WHERE status IN ('pending', 'dead_lettered')`
+    );
+    metricsCache = {
+      timestamp: now,
+      queueDepth: rows[0]?.queue_depth ?? 0,
+      deadLetterCount: rows[0]?.dead_letter_count ?? 0,
+      oldestPendingJobAgeMs: Math.round(rows[0]?.oldest_pending_job_age_ms ?? 0)
+    };
+  } catch {
+    // stale cache is better than a broken metrics endpoint
+  }
+}
+
 validateProductionConfig("job-worker");
 
 const healthPort = Number(process.env.PORT || 9102);
-const healthServer = createServer((req, res) => {
+const healthServer = createServer(async (req, res) => {
   res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
   if (req.url === "/metrics") {
-    res.end(JSON.stringify({ status: "ok", service: "job-worker", startedAt, ...metrics }));
+    await refreshMetricsCache();
+    res.end(JSON.stringify({
+      status: "ok",
+      service: "job-worker",
+      startedAt,
+      claimed: metrics.claimed,
+      completed: metrics.completed,
+      failed: metrics.failed,
+      deadLettered: metrics.deadLettered,
+      noHandler: metrics.noHandler,
+      queueDepth: metricsCache.queueDepth,
+      deadLetterCount: metricsCache.deadLetterCount,
+      oldestPendingJobAgeMs: metricsCache.oldestPendingJobAgeMs
+    }));
   } else {
     res.end(JSON.stringify({ status: "ok", service: "job-worker" }));
   }
@@ -102,6 +142,148 @@ registerHandler("process-settlement-webhook", async (job) => {
   // Future: trigger reconciliation match or saga settlement confirmation
 });
 
+// — match-statement handler (V6 Epic 5.2) —
+// The job worker orchestrates over HTTP like the saga does: the reconciliation role owns
+// its schema; the worker never touches reconciliation tables directly.
+registerHandler("match-statement", async (job) => {
+  const tenantId = job.tenant_id || DEFAULT_TENANT_ID;
+  const { statementId } = job.payload;
+  await servicePost("reconciliation", `/statements/${statementId}/match`, {}, { tenantId });
+});
+
+// — ops-watchdog handler —
+const WATCHDOG_STUCK_EXECUTING_MS = Number(process.env.WATCHDOG_STUCK_EXECUTING_MS || 300000); // 5 minutes
+const WATCHDOG_OUTBOX_LAG_MS = Number(process.env.WATCHDOG_OUTBOX_LAG_MS || 60000); // 1 minute
+const WATCHDOG_PENDING_JOB_AGE_MS = Number(process.env.WATCHDOG_PENDING_JOB_AGE_MS || 300000); // 5 minutes
+
+registerHandler("ops-watchdog", async () => {
+  await runWatchdog(DEFAULT_TENANT_ID);
+});
+
+async function runWatchdog(tenantId) {
+  const checks = [];
+
+  // Stuck Executing payments
+  const { rows: stuckRows } = await query("payment",
+    `SELECT COUNT(*)::int AS count
+     FROM payment.payments
+     WHERE status = 'Executing'
+       AND tenant_id = $1
+       AND created_at < now() - ($2 || ' ms')::interval`,
+    [tenantId, String(WATCHDOG_STUCK_EXECUTING_MS)]
+  );
+  checks.push({
+    type: "stuck_executing_payments",
+    title: "Stuck Executing payments",
+    count: stuckRows[0]?.count || 0,
+    threshold: 0
+  });
+
+  // Outbox lag
+  const { rows: outboxRows } = await query("platform",
+    `SELECT COALESCE(EXTRACT(EPOCH FROM NOW() - MIN(created_at)) * 1000, 0)::float AS lag_ms
+     FROM platform.outbox_events WHERE published_at IS NULL`
+  );
+  const outboxLag = Math.round(outboxRows[0]?.lag_ms || 0);
+  checks.push({
+    type: "outbox_lag",
+    title: "Outbox lag exceeded",
+    count: outboxLag,
+    threshold: WATCHDOG_OUTBOX_LAG_MS
+  });
+
+  // Dead-letter queue
+  const { rows: dlqRows } = await query("platform",
+    "SELECT COUNT(*)::int AS count FROM platform.jobs WHERE status = 'dead_lettered'"
+  );
+  const dlqCount = dlqRows[0]?.count || 0;
+  checks.push({
+    type: "dead_letter_queue",
+    title: "Dead-letter queue non-empty",
+    count: dlqCount,
+    threshold: 0
+  });
+
+  // Oldest pending job
+  const { rows: pendingRows } = await query("platform",
+    `SELECT COALESCE(EXTRACT(EPOCH FROM NOW() - MIN(created_at)) * 1000, 0)::float AS age_ms
+     FROM platform.jobs WHERE status = 'pending'`
+  );
+  const pendingAge = Math.round(pendingRows[0]?.age_ms || 0);
+  checks.push({
+    type: "pending_job_age",
+    title: "Pending job age exceeded",
+    count: pendingAge,
+    threshold: WATCHDOG_PENDING_JOB_AGE_MS
+  });
+
+  for (const check of checks) {
+    await evaluateWatchdogCheck(tenantId, check);
+  }
+}
+
+// — audit-chain-verify handler (V6 Epic 3) —
+// Recomputes every audit row hash and checks per-tenant linkage/continuity. On break:
+// one Open alert per broken tenant (deduped like watchdog alerts). When the chain is
+// fully intact, open chain alerts are closed (e.g. after a demo reset rebuilt the chain).
+const AUDIT_CHAIN_ALERT_TITLE = "Audit chain integrity violation";
+
+registerHandler("audit-chain-verify", async () => {
+  const result = await verifyAuditChain("operations");
+  if (result.ok) {
+    await query("operations",
+      "UPDATE operations.alerts SET status = 'Closed' WHERE title = $1 AND status = 'Open'",
+      [AUDIT_CHAIN_ALERT_TITLE]
+    );
+    return;
+  }
+  const broken = result.break;
+  console.error(JSON.stringify({ at: new Date().toISOString(), event: "audit_chain_break", ...broken }));
+  const { rows: existing } = await query("operations",
+    "SELECT id FROM operations.alerts WHERE tenant_id = $1 AND title = $2 AND status = 'Open' LIMIT 1",
+    [broken.tenantId, AUDIT_CHAIN_ALERT_TITLE]
+  );
+  if (!existing[0]) {
+    await query("operations",
+      `INSERT INTO operations.alerts (id, tenant_id, severity, title, detail, status)
+       VALUES ($1, $2, 'High', $3, $4, 'Open')`,
+      [`ac-${Date.now().toString(36)}`, broken.tenantId, AUDIT_CHAIN_ALERT_TITLE,
+       `${broken.reason} at chain_seq ${broken.chainSeq} (event ${broken.id}). See docs/RUNBOOKS.md "Audit chain break".`]
+    );
+  }
+});
+
+async function evaluateWatchdogCheck(tenantId, check) {
+  const alertTitle = `${check.title}`;
+  const triggered = check.count > check.threshold;
+
+  // Check for existing open alert
+  const { rows: existing } = await query("operations",
+    "SELECT id, status FROM operations.alerts WHERE tenant_id = $1 AND title = $2 ORDER BY created_at DESC LIMIT 1",
+    [tenantId, alertTitle]
+  );
+
+  if (triggered) {
+    // Create alert only if no open alert exists for this type
+    const openAlert = existing.find((a) => a.status === "Open");
+    if (!openAlert) {
+      const alertId = `wd-${check.type}-${Date.now().toString(36)}`;
+      await query("operations",
+        `INSERT INTO operations.alerts (id, tenant_id, severity, title, detail, status)
+         VALUES ($1, $2, $3, $4, $5, 'Open')`,
+        [alertId, tenantId, "High", alertTitle,
+         `${check.type}: ${check.count} > ${check.threshold}. Outbox lag: ${check.count}ms.`]
+      );
+    }
+  } else if (existing.length > 0) {
+    // Condition cleared: close all open alerts of this type
+    await query("operations",
+      "UPDATE operations.alerts SET status = 'Closed' WHERE tenant_id = $1 AND title = $2 AND status = 'Open'",
+      [tenantId, alertTitle]
+    );
+  }
+}
+
 async function executePaymentSaga(paymentId, jobId, tenantId = DEFAULT_TENANT_ID) {
   const PB = "payment";
 
@@ -140,7 +322,39 @@ async function executePaymentSaga(paymentId, jobId, tenantId = DEFAULT_TENANT_ID
   }
   await recordAttempt(paymentId, jobId, "policy_check", "success", null, tenantId);
 
-  // Step 2: Ledger debit (idempotent by idempotency_key)
+  // Step 2: Provider submission (before debit — if the provider rejects, we never debit).
+  // Idempotent: if provider_ref already set from a previous crashed attempt, skip re-submission.
+  await recordAttempt(paymentId, jobId, "provider_submission", "started", null, tenantId);
+  let providerRef = payment.providerRef;
+  let chainRef = payment.chainRef;
+  if (!providerRef) {
+    try {
+      const adapter = await resolveAdapter(context.providerId || context.provider?.id || "prov-arcadia");
+      if (!adapter) {
+        throw Object.assign(new Error("No custody adapter resolved"), { code: "adapter_unavailable" });
+      }
+      const result = await withBreaker(
+        context.providerId || context.provider?.id || "prov-arcadia",
+        () => adapter.submitTransfer({ payment, context })
+      );
+      providerRef = result.providerRef;
+      chainRef = result.chainRef;
+      await query(
+        PB,
+        "UPDATE payment.payments SET provider_ref = $1, chain_ref = $2 WHERE id = $3 AND tenant_id = $4",
+        [providerRef, chainRef, paymentId, tenantId]
+      );
+    } catch (error) {
+      await recordAttempt(paymentId, jobId, "provider_submission", "error", error.message, tenantId);
+      await query(PB, "UPDATE payment.payments SET status = 'Failed' WHERE id = $1 AND tenant_id = $2 AND status = 'Executing'", [
+        paymentId, tenantId
+      ]);
+      return;
+    }
+  }
+  await recordAttempt(paymentId, jobId, "provider_submission", "success", null, tenantId);
+
+  // Step 3: Ledger debit (idempotent by idempotency_key, after provider ref is persisted).
   await recordAttempt(paymentId, jobId, "ledger_debit", "started", null, tenantId);
   const destinationWallet = context.wallets.find(
     (candidate) =>
@@ -168,17 +382,6 @@ async function executePaymentSaga(paymentId, jobId, tenantId = DEFAULT_TENANT_ID
     ]);
     throw error;
   }
-
-  // Step 3: Provider submission (simulated until M5 adapters)
-  await recordAttempt(paymentId, jobId, "provider_submission", "started", null, tenantId);
-  const providerRef = payment.providerRef || `ARC-${randomHex(5)}`;
-  const chainRef = payment.chainRef || `0x${randomHex(14).toLowerCase()}`;
-  await query(
-    PB,
-    "UPDATE payment.payments SET provider_ref = $1, chain_ref = $2 WHERE id = $3 AND tenant_id = $4",
-    [providerRef, chainRef, paymentId, tenantId]
-  );
-  await recordAttempt(paymentId, jobId, "provider_submission", "success", null, tenantId);
 
   // Step 4: Journal + reconciliation + settle
   const settlingPayment = { ...payment, providerRef, chainRef, status: "Executing" };
@@ -226,6 +429,24 @@ async function executePaymentSaga(paymentId, jobId, tenantId = DEFAULT_TENANT_ID
       })
     ]
   );
+
+  // V6 Epic 5.2, OPT-IN: the simulated rail emits a single-line provider statement on
+  // settlement so the full settle → ingest → match path runs end to end without a
+  // partner. Default OFF: enabling it would add a statement-confirmed match per
+  // settlement and change demo/test reconciliation counts.
+  if (process.env.SIMULATED_STATEMENT_EMIT === "true") {
+    const providerId = context.providerId || context.provider?.id || "prov-arcadia";
+    try {
+      await servicePost("reconciliation", "/statements", {
+        providerId,
+        externalId: `sim-stmt-${providerRef}`,
+        lines: [{ providerRef, amount: payment.amount, asset: payment.asset, occurredAt: settledAt }]
+      }, { tenantId });
+    } catch (error) {
+      // Statement emission is a simulation aid, never a saga step: settlement stays settled.
+      console.error(JSON.stringify({ at: new Date().toISOString(), event: "simulated_statement_emit_failed", message: error.message }));
+    }
+  }
 }
 
 async function getPaymentContext(payment, tenantId = DEFAULT_TENANT_ID) {
@@ -235,7 +456,7 @@ async function getPaymentContext(payment, tenantId = DEFAULT_TENANT_ID) {
   const counterparty = await serviceGet("compliance", `/counterparties/${payment.counterpartyId}`, { tenantId });
   const provider = await serviceGet("operations", `/providers/${wallet.providerId}`, { tenantId });
   const wallets = await serviceGet("wallet", "/wallets", { tenantId });
-  return { wallet, wallets, entity, asset, counterparty, provider };
+  return { wallet, wallets, entity, asset, counterparty, provider, providerId: wallet.providerId };
 }
 
 function fromPaymentRow(row) {

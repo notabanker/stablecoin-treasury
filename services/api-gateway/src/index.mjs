@@ -2,16 +2,17 @@ import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ratesToEur } from "../../../packages/shared/data.mjs";
-import { authenticateUser, checkLoginRateLimit, clearLoginFailures, createSession, csrfCookieHeader, destroySession, emitSecurityAudit, recordLoginFailure, requireAuth, requireAuthWithCsrf, requirePermission, resolveUserByEmail, sessionCookieHeader } from "../../../packages/shared/auth.mjs";
+import { authenticateUser, checkLoginRateLimit, clearLoginFailures, createSession, csrfCookieHeader, destroySession, emitSecurityAudit, recordLoginFailure, requireAuth, requireAuthWithCsrf, requirePermission, resolveUserByEmail, sessionCookieHeader, sessionCookieName, csrfCookieName } from "../../../packages/shared/auth.mjs";
 import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
 import { createJsonService, httpError, ok, route } from "../../../packages/shared/http.mjs";
 import { serviceGet, servicePost, serviceUrls } from "../../../packages/shared/service-client.mjs";
 import { validateProductionConfig } from "../../../packages/shared/config.mjs";
-import { processWebhook } from "./webhooks.mjs";
+import { processWebhook, webhookMetrics } from "./webhooks.mjs";
 
 const port = Number(process.env.GATEWAY_PORT || process.env.PORT || 8080);
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const webRoot = resolve(projectRoot, "apps/web");
+const PAYMENT_MUTATION_TIMEOUT_MS = Number(process.env.PAYMENT_MUTATION_TIMEOUT_MS || 10000);
 
 validateProductionConfig("api-gateway");
 
@@ -23,6 +24,11 @@ createJsonService({
   name: "api-gateway",
   port,
   staticRoot: webRoot,
+  extraMetrics: () => ({
+    webhookSignatureFailures: webhookMetrics.signatureFailures,
+    webhooksProcessed: webhookMetrics.processed,
+    webhookDuplicates: webhookMetrics.duplicates
+  }),
   routes: [
     route("GET", "/health", () => ok({ status: "ok", service: "api-gateway" })),
     route("GET", "/ready", async () => ok(await readiness())),
@@ -32,7 +38,10 @@ createJsonService({
       const result = await login(ctx.body, ctx);
       return { status: 200, body: result.body, cookies: result.cookies };
     }),
-    route("POST", "/api/logout", requireAuthWithCsrf(async (ctx) => ok(await logout(ctx)))),
+    route("POST", "/api/logout", requireAuthWithCsrf(async (ctx) => {
+      const result = await logout(ctx);
+      return { status: 200, body: { message: result.message }, cookies: result.cookies };
+    })),
     route("POST", "/api/reset", perm("admin:reset")(async (ctx) => {
       const options = tenantOptions(ctx);
       await Promise.all([
@@ -48,25 +57,28 @@ createJsonService({
       })),
     route("POST", "/api/payments", paymentPerm("create")(async (ctx) => {
       const result = await servicePost("payment", "/payments", ctx.body, {
-        ...tenantOptions(ctx),
+        ...paymentMutationOptions(ctx),
         idempotencyKey: ctx.headers["idempotency-key"] || randomUUID()
       });
       return ok({ ...result, state: await composeStateSafe(ctx) });
     })),
     route("POST", "/api/payments/:id/approve", paymentPerm("approve")(async (ctx) => {
-      const result = await servicePost("payment", `/payments/${ctx.params.id}/approve`, {}, tenantOptions(ctx));
+      const result = await servicePost("payment", `/payments/${ctx.params.id}/approve`, {}, paymentMutationOptions(ctx));
       return ok({ ...result, state: await composeStateSafe(ctx) });
     })),
     route("POST", "/api/payments/:id/execute", paymentPerm("execute")(async (ctx) => {
-      const result = await servicePost("payment", `/payments/${ctx.params.id}/execute`, {}, tenantOptions(ctx));
+      const result = await servicePost("payment", `/payments/${ctx.params.id}/execute`, {}, paymentMutationOptions(ctx));
       return ok({ ...result, state: await composeStateSafe(ctx) });
     })),
     route("POST", "/api/payments/:id/cancel", paymentPerm("cancel")(async (ctx) => {
-      const result = await servicePost("payment", `/payments/${ctx.params.id}/cancel`, {}, tenantOptions(ctx));
+      const result = await servicePost("payment", `/payments/${ctx.params.id}/cancel`, {}, paymentMutationOptions(ctx));
       return ok({ ...result, state: await composeStateSafe(ctx) });
     })),
     route("GET", "/api/payments/:id/attempts", guard(async (ctx) => {
       return ok({ attempts: await serviceGet("payment", `/payments/${ctx.params.id}/attempts`, tenantOptions(ctx)) });
+    })),
+    route("GET", "/api/payments/:id/approvals", guard(async (ctx) => {
+      return ok(await serviceGet("payment", `/payments/${ctx.params.id}/approvals`, tenantOptions(ctx)));
     })),
     route("POST", "/api/policies", perm("policy:update")(async (ctx) => {
       await servicePost("policy", "/policies", ctx.body, tenantOptions(ctx));
@@ -176,6 +188,11 @@ async function login(body, ctx) {
   clearLoginFailures(ip, email);
   await emitSecurityAudit({ actor: user.displayName, action: "Login success", object: user.email, detail: `Successful login from ${ip}`, tenantId: user.tenantId });
 
+  // Session rotation: if the client presents a valid session cookie, destroy it
+  // before issuing a new one to prevent session fixation.
+  const oldSessionToken = extractSessionCookie(ctx?.headers);
+  if (oldSessionToken) await destroySession(oldSessionToken);
+
   const session = await createSession(user.id, user.tenantId);
   const cookies = [
     sessionCookieHeader(session.token, session.expiresAt),
@@ -191,12 +208,23 @@ async function login(body, ctx) {
   };
 }
 
+function extractSessionCookie(headers) {
+  const cookieHeader = headers?.["cookie"];
+  if (!cookieHeader) return null;
+  const match = cookieHeader.match(/(?:__Host-session|session)=([^;]+)/);
+  return match ? match[1] : null;
+}
+
 async function logout(ctx) {
   if (ctx.user?.sessionToken) {
     await destroySession(ctx.user.sessionToken);
     await emitSecurityAudit({ actor: ctx.user.displayName || "unknown", action: "Logout", object: ctx.user.email || "unknown", detail: "Session terminated", tenantId: ctx.tenantId || ctx.user.tenantId || DEFAULT_TENANT_ID });
   }
-  return { message: "Logged out" };
+  // Send Max-Age=0 cookies to clear both session and csrf cookies client-side
+  const secure = process.env.SESSION_COOKIE_SECURE === "true" ? "; Secure" : "";
+  const clearSession = `${sessionCookieName()}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax${secure}`;
+  const clearCsrf = `${csrfCookieName()}=; Path=/; Max-Age=0; SameSite=Lax${secure}`;
+  return { message: "Logged out", cookies: [clearSession, clearCsrf] };
 }
 
 async function composeState(ctx) {
@@ -320,21 +348,19 @@ async function composeStateSafe(ctx) {
   };
 }
 
-function stateRefresh(ctx) {
-  const wantsState = ctx.query?.state === "true" || ctx.query?.state === "1" || ctx.query?.refresh === "true";
-  return wantsState ? composeStateSafe(ctx) : composeStateSafe(ctx).then((s) => {
-    // Always include minimal state for UI consistency unless the client explicitly disables it.
-    // This keeps existing frontend behavior intact while enabling leaner clients.
-    return s;
-  });
-}
-
 function tenantOptions(ctx, extra = {}) {
   return {
     ...extra,
     requestId: ctx?.requestId,
-    tenantId: ctx?.tenantId || ctx?.user?.tenantId
+    tenantId: ctx?.tenantId || ctx?.user?.tenantId,
+    actingUser: ctx?.user?.userId
+      ? { id: ctx.user.userId, display: ctx.user.displayName || "Unknown" }
+      : undefined
   };
+}
+
+function paymentMutationOptions(ctx) {
+  return tenantOptions(ctx, { timeoutMs: PAYMENT_MUTATION_TIMEOUT_MS });
 }
 
 async function readiness() {

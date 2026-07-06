@@ -80,7 +80,9 @@ export async function failJob(jobId, error, { maxAttempts = 5 } = {}) {
     );
     if (!rows[0]) return null;
     const job = rows[0];
-    const nextAttempt = job.attempts + 1;
+    // job.attempts was already incremented by claimJobs — this IS the current attempt number.
+    // Do not double-increment it here.
+    const nextAttempt = job.attempts;
     if (nextAttempt >= maxAttempts) {
       await client.query(
         "UPDATE platform.jobs SET status = 'dead_lettered', last_error = $1, attempts = $2, locked_by = NULL WHERE id = $3",

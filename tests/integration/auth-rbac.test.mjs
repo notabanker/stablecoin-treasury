@@ -256,7 +256,7 @@ test("cookie-authenticated POST /api/logout with correct X-Csrf-Token returns 20
   const csrfToken = extractCookie(loginRes.setCookie, "csrf");
   assert.ok(sessionCookie && csrfToken, "login should set both cookies");
 
-  const valid = await api(stack.baseUrl, "/logout", {
+  const valid = await fetchRaw(stack.baseUrl, "/logout", {
     method: "POST",
     headers: {
       Cookie: `session=${sessionCookie}; csrf=${csrfToken}`,
@@ -264,10 +264,71 @@ test("cookie-authenticated POST /api/logout with correct X-Csrf-Token returns 20
     }
   });
   assert.equal(valid.status, 200);
+  assert.ok(valid.setCookie.some((cookie) => cookie.startsWith("session=;") && cookie.includes("Max-Age=0")));
+  assert.ok(valid.setCookie.some((cookie) => cookie.startsWith("csrf=;") && cookie.includes("Max-Age=0")));
+});
+
+test("secure mode uses __Host cookies and logout clears them with Secure", async (t) => {
+  const stack = await startStack({
+    extraEnv: {
+      AUTH_REQUIRED: "true",
+      SESSION_COOKIE_SECURE: "true"
+    }
+  });
+  t.after(() => stack.stop());
+
+  const loginRes = await fetchRaw(stack.baseUrl, "/login", {
+    method: "POST",
+    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123" })
+  });
+  assert.equal(loginRes.status, 200);
+  const sessionCookie = extractCookie(loginRes.setCookie, "__Host-session");
+  const csrfToken = extractCookie(loginRes.setCookie, "__Host-csrf");
+  assert.ok(sessionCookie && csrfToken, "secure mode should set __Host-prefixed cookies");
+  assert.ok(loginRes.setCookie.some((cookie) => cookie.startsWith("__Host-session=") && cookie.includes("Secure")));
+  assert.ok(loginRes.setCookie.some((cookie) => cookie.startsWith("__Host-csrf=") && cookie.includes("Secure")));
+
+  const logoutRes = await fetchRaw(stack.baseUrl, "/logout", {
+    method: "POST",
+    headers: {
+      Cookie: `__Host-session=${sessionCookie}; __Host-csrf=${csrfToken}`,
+      "X-Csrf-Token": csrfToken
+    }
+  });
+  assert.equal(logoutRes.status, 200);
+  assert.ok(logoutRes.setCookie.some((cookie) => cookie.startsWith("__Host-session=;") && cookie.includes("Max-Age=0") && cookie.includes("Secure")));
+  assert.ok(logoutRes.setCookie.some((cookie) => cookie.startsWith("__Host-csrf=;") && cookie.includes("Max-Age=0") && cookie.includes("Secure")));
+});
+
+test("session idle timeout expires inactive cookie sessions", async (t) => {
+  const stack = await startStack({
+    extraEnv: {
+      AUTH_REQUIRED: "true",
+      SESSION_IDLE_TTL_MINUTES: "0.01",
+      SESSION_ABSOLUTE_TTL_HOURS: "1"
+    }
+  });
+  t.after(() => stack.stop());
+
+  const loginRes = await fetchRaw(stack.baseUrl, "/login", {
+    method: "POST",
+    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123" })
+  });
+  assert.equal(loginRes.status, 200);
+  const sessionCookie = extractCookie(loginRes.setCookie, "session");
+  assert.ok(sessionCookie);
+
+  await new Promise((resolve) => setTimeout(resolve, 900));
+
+  const state = await api(stack.baseUrl, "/state", {
+    headers: { Cookie: `session=${sessionCookie}` }
+  });
+  assert.equal(state.status, 401);
+  assert.equal(state.data.error, "unauthorized");
 });
 
 // GAP 2 — Null-CSRF session cannot mutate
-test("cookie-authenticated POST /api/payments with null csrf_token returns 403", async (t) => {
+test("cookie-authenticated POST /api/payments with null csrf_token is rejected by DB NOT NULL constraint", async (t) => {
   const prevAuth = process.env.AUTH_REQUIRED;
   process.env.AUTH_REQUIRED = "true";
   const stack = await startStack();
@@ -284,14 +345,22 @@ test("cookie-authenticated POST /api/payments with null csrf_token returns 403",
   const sessionCookie = extractCookie(loginRes.setCookie, "session");
   assert.ok(sessionCookie);
 
-  // Null the csrf_token directly in the DB to simulate a legacy session
-  // Use the stack's credentialed URL (required for CI environments with SCRAM auth)
+  // The DB NOT NULL constraint on csrf_token (migration 0030) rejects nulling
+  // the column — a legacy attack vector that is now closed at the schema level
+  // in addition to the runtime check.
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: stack._env.DATABASE_URL });
   await client.connect();
-  await client.query("UPDATE identity.sessions SET csrf_token = NULL WHERE token = $1", [sessionCookie]);
+  await assert.rejects(
+    () => client.query("UPDATE identity.sessions SET csrf_token = NULL WHERE token = $1", [sessionCookie]),
+    /null value|not-null|violates not-null/,
+    "DB must reject null csrf_token update"
+  );
+  await client.query("UPDATE identity.sessions SET csrf_token = '' WHERE token = $1", [sessionCookie]);
   await client.end();
 
+  // Empty-string csrf_token: the runtime check (verifyCsrf) still rejects it
+  // even though the DB allowed the empty-string update.
   const mutation = await api(stack.baseUrl, "/payments", {
     method: "POST",
     headers: {

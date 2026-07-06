@@ -13,5 +13,5 @@ export async function reseedJournals() {
         [entry.id, DEFAULT_TENANT_ID, entry.date, entry.entityId, entry.paymentId, entry.account, entry.debit, entry.credit, entry.currency, entry.status]
       );
     }
-  });
+  }, { tenantId: DEFAULT_TENANT_ID });
 }

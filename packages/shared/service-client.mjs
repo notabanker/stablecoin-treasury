@@ -13,7 +13,7 @@ const defaultRetries = Number(process.env.SERVICE_RETRIES || 2);
 
 // Options that configure this client's own behavior, not fetch() -- must never be spread into
 // the fetch init object.
-const CLIENT_ONLY_OPTION_KEYS = ["retryable", "idempotencyKey", "tenantId", "timeoutMs", "requestId"];
+const CLIENT_ONLY_OPTION_KEYS = ["retryable", "idempotencyKey", "tenantId", "timeoutMs", "requestId", "actingUser"];
 
 export async function serviceGet(service, path, options = {}) {
   return serviceRequest(service, path, { method: "GET", retryable: true, ...options });
@@ -37,15 +37,19 @@ export async function serviceRequest(service, path, options) {
   const fetchInit = fetchInitFrom(options);
   let lastError;
 
-  // Internal service auth: sign every outgoing call with the shared internal token.
-  // This is a simple HMAC over (path, body) — services validate it via http.mjs middleware.
+  // Internal service auth: sign every outgoing call with the shared internal token
+  // when configured. Acting user context is always sent alongside if provided.
   const internalToken = process.env.INTERNAL_SERVICE_TOKEN;
+  const actingUserStr = options.actingUser ? JSON.stringify(options.actingUser) : "";
   let internalSig = {};
   if (internalToken) {
     const { createHmac } = await import("node:crypto");
-    const payload = `${options.method || "GET"}|${path}|${fetchInit.body || "{}"}`;
+    const payload = `${options.method || "GET"}|${path}|${fetchInit.body || "{}"}|${actingUserStr}`;
     const sig = createHmac("sha256", internalToken).update(payload).digest("hex");
     internalSig = { "X-Internal-Signature": sig };
+  }
+  if (actingUserStr) {
+    internalSig["X-Acting-User"] = actingUserStr;
   }
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -153,12 +157,14 @@ function normalizeError(service, error, timedOut = false) {
     const timeout = new Error(`${service} request timed out`);
     timeout.name = "AbortError";
     timeout.status = 504;
+    timeout.code = "upstream_timeout";
     timeout.body = { error: "upstream_timeout", service };
     return timeout;
   }
   if (!error.status) {
     const upstream = new Error(`${service} request failed: ${error.message}`);
     upstream.status = 502;
+    upstream.code = "upstream_unavailable";
     upstream.body = { error: "upstream_unavailable", service };
     return upstream;
   }

@@ -1,15 +1,25 @@
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { insertAuditEvent } from "./audit.mjs";
 import { query } from "./db.mjs";
 import { httpError } from "./http.mjs";
 import { DEFAULT_TENANT_ID } from "./tenant.mjs";
 
 const DB = "identity";
-const SESSION_TTL_HOURS = 24;
+const SESSION_TTL_HOURS = Number(process.env.SESSION_ABSOLUTE_TTL_HOURS || 24);
+const SESSION_IDLE_TTL_MINUTES = Number(process.env.SESSION_IDLE_TTL_MINUTES || 0);
+const SESSION_IDLE_BUMP_GRACE_MS = 60_000; // bump expires_at at most once per minute
 const SCRYPT_N = 16384;
 const SCRYPT_R = 8;
 const SCRYPT_P = 1;
 const SCRYPT_KEYLEN = 64;
 const SCRYPT_MAXMEM = 64 * 1024 * 1024;
+
+// __Host- prefix: when SESSION_COOKIE_SECURE=true, use the Host-prefixed cookie names.
+// The __Host- prefix requires Secure, Path=/, and no Domain — all already true in the
+// cookie-building functions. The prefix is not used when SECURE is off (local dev).
+let useHostPrefix = process.env.SESSION_COOKIE_SECURE === "true";
+const SESSION_COOKIE_NAME = useHostPrefix ? "__Host-session" : "session";
+const CSRF_COOKIE_NAME = useHostPrefix ? "__Host-csrf" : "csrf";
 
 // Login rate limiter: keyed by (ip, email). Failed attempts increment; successful login clears.
 const LOGIN_WINDOW_MS = Number(process.env.LOGIN_RATE_LIMIT_WINDOW_MS || 60000);
@@ -60,14 +70,26 @@ export function clearLoginFailures(ip, email) {
 
 export async function emitSecurityAudit({ tenantId = DEFAULT_TENANT_ID, actor, action, object, detail } = {}) {
   try {
-    await query(
-      "operations",
-      `INSERT INTO operations.audit_events (id, tenant_id, actor, action, object, detail, at)
-       VALUES ($1, $2, $3, $4, $5, $6, now())`,
-      [randomBytes(8).toString("hex"), tenantId, actor, action, object, detail || ""]
-    );
-  } catch {
-    // Don't let audit failure block the operation.
+    await insertAuditEvent("operations", {
+      id: randomBytes(8).toString("hex"),
+      tenantId,
+      actor,
+      action,
+      object,
+      detail: detail || "",
+      at: new Date()
+    });
+  } catch (error) {
+    // Fail-open by design: an audit insert failure must never block login/logout.
+    // A dropped event is a MISSING row, not a chain break — the hash chain proves the
+    // integrity of recorded events, not the completeness of events that failed to record.
+    // Log loudly so operators can spot systematic drops.
+    console.error(JSON.stringify({
+      at: new Date().toISOString(),
+      event: "security_audit_insert_failed",
+      action,
+      message: error.message
+    }));
   }
 }
 
@@ -96,7 +118,12 @@ function generateToken() {
 export async function createSession(userId, tenantId = DEFAULT_TENANT_ID) {
   const token = generateToken();
   const csrfToken = randomBytes(16).toString("hex");
-  const expiresAt = new Date(Date.now() + SESSION_TTL_HOURS * 3600_000).toISOString();
+  const now = Date.now();
+  const absoluteExpiresAt = now + SESSION_TTL_HOURS * 3600_000;
+  const idleExpiresAt = SESSION_IDLE_TTL_MINUTES > 0
+    ? now + SESSION_IDLE_TTL_MINUTES * 60_000
+    : absoluteExpiresAt;
+  const expiresAt = new Date(Math.min(idleExpiresAt, absoluteExpiresAt)).toISOString();
   await query(
     DB,
     `INSERT INTO identity.sessions (user_id, tenant_id, token, csrf_token, expires_at)
@@ -201,13 +228,33 @@ export async function validateSession(token) {
     [token]
   );
   if (!rows[0]) return null;
+  const session = rows[0];
+
+  // Idle timeout: if SESSION_IDLE_TTL_MINUTES is set (> 0), bump expires_at
+  // forward on each validation, but at most once per SESSION_IDLE_BUMP_GRACE_MS
+  // to avoid write amplification. Never exceed created_at + absolute TTL.
+  if (SESSION_IDLE_TTL_MINUTES > 0) {
+    const now = Date.now();
+    const expiresMs = new Date(session.expires_at).getTime();
+    const idleDeadline = now + SESSION_IDLE_TTL_MINUTES * 60_000;
+    if (idleDeadline > expiresMs + SESSION_IDLE_BUMP_GRACE_MS) {
+      const absCap = new Date(session.created_at).getTime() + SESSION_TTL_HOURS * 3600_000;
+      const newExpires = new Date(Math.min(idleDeadline, absCap));
+      if (newExpires.getTime() > expiresMs) {
+        await query(DB, "UPDATE identity.sessions SET expires_at = $1 WHERE token = $2",
+          [newExpires.toISOString(), token]);
+        session.expires_at = newExpires.toISOString();
+      }
+    }
+  }
+
   return {
-    userId: rows[0].user_id,
-    email: rows[0].email,
-    displayName: rows[0].display_name,
-    tenantId: rows[0].tenant_id,
-    csrfToken: rows[0].csrf_token || "",
-    roles: await loadRoles(rows[0].user_id),
+    userId: session.user_id,
+    email: session.email,
+    displayName: session.display_name,
+    tenantId: session.tenant_id,
+    csrfToken: session.csrf_token || "",
+    roles: await loadRoles(session.user_id),
     sessionToken: token
   };
 }
@@ -223,7 +270,7 @@ export function verifyCsrf(sessionUser, headerToken, { authSource } = {}) {
 export function sessionCookieHeader(token, expiresAt, { httpOnly = true } = {}) {
   const secure = process.env.SESSION_COOKIE_SECURE === "true";
   const maxAge = Math.max(0, Math.ceil((new Date(expiresAt).getTime() - Date.now()) / 1000));
-  let cookie = `session=${token}; Path=/; SameSite=Lax; Max-Age=${maxAge}`;
+  let cookie = `${SESSION_COOKIE_NAME}=${token}; Path=/; SameSite=Lax; Max-Age=${maxAge}`;
   if (httpOnly) cookie += "; HttpOnly";
   if (secure) cookie += "; Secure";
   return cookie;
@@ -232,9 +279,17 @@ export function sessionCookieHeader(token, expiresAt, { httpOnly = true } = {}) 
 export function csrfCookieHeader(token, expiresAt) {
   const secure = process.env.SESSION_COOKIE_SECURE === "true";
   const maxAge = Math.max(0, Math.ceil((new Date(expiresAt).getTime() - Date.now()) / 1000));
-  let cookie = `csrf=${token}; Path=/; SameSite=Lax; Max-Age=${maxAge}`;
+  let cookie = `${CSRF_COOKIE_NAME}=${token}; Path=/; SameSite=Lax; Max-Age=${maxAge}`;
   if (secure) cookie += "; Secure";
   return cookie;
+}
+
+export function sessionCookieName() {
+  return SESSION_COOKIE_NAME;
+}
+
+export function csrfCookieName() {
+  return CSRF_COOKIE_NAME;
 }
 
 // CSRF-protected requireAuth: for cookie-authenticated sessions, require a matching
@@ -343,11 +398,11 @@ function extractToken(headers) {
     return authHeader.slice(7);
   }
 
-  // Fall back to session cookie
+  // Accept both plain and __Host- prefixed session cookie names
   const cookieHeader = headers["cookie"];
   if (cookieHeader) {
     const cookies = parseCookies(cookieHeader);
-    return cookies["session"] || null;
+    return cookies["__Host-session"] || cookies["session"] || null;
   }
 
   return null;

@@ -1,10 +1,13 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { query } from "../../../packages/shared/db.mjs";
+import { query, runWithTenant } from "../../../packages/shared/db.mjs";
 import { enqueueJob } from "../../../packages/shared/jobs.mjs";
 import { httpError } from "../../../packages/shared/http.mjs";
 
 const DB = "platform";
 const OPS = "operations";
+
+// Counters exposed via gateway metrics.
+export const webhookMetrics = { signatureFailures: 0, processed: 0, duplicates: 0 };
 
 export function verifySignature(payload, secret, signature) {
   const expected = createHmac("sha256", secret)
@@ -58,43 +61,50 @@ export async function processWebhook(providerId, body, signature) {
 
   const signatureValid = verifySignature(body, secret, signature);
   if (!signatureValid) {
+    webhookMetrics.signatureFailures++;
     throw httpError(401, "Invalid webhook signature", "invalid_signature");
   }
 
   // Tenant is derived from the provider configuration, never from the request body.
+  // The webhook request itself carries no tenant header, so the RLS tenant context is
+  // entered explicitly here for all writes that follow.
   const tenantId = provider.tenant_id;
 
-  // Deduplicate by (provider_id, tenant_id, external_id)
-  try {
-    await query(
-      DB,
-      `INSERT INTO platform.webhook_events (provider_id, tenant_id, external_id, event_type, signature_valid, payload)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [
-        providerId,
-        tenantId,
-        eventId,
-        body.eventType || body.type || "unknown",
-        signatureValid,
-        JSON.stringify(body)
-      ]
-    );
-  } catch (error) {
-    if (error.code === "23505") {
-      return { status: "duplicate", message: "Webhook already processed" };
+  return runWithTenant(tenantId, async () => {
+    // Deduplicate by (provider_id, tenant_id, external_id)
+    try {
+      await query(
+        DB,
+        `INSERT INTO platform.webhook_events (provider_id, tenant_id, external_id, event_type, signature_valid, payload)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          providerId,
+          tenantId,
+          eventId,
+          body.eventType || body.type || "unknown",
+          signatureValid,
+          JSON.stringify(body)
+        ]
+      );
+      webhookMetrics.processed++;
+    } catch (error) {
+      if (error.code === "23505") {
+        webhookMetrics.duplicates++;
+        return { status: "duplicate", message: "Webhook already processed" };
+      }
+      throw error;
     }
-    throw error;
-  }
 
-  const eventType = body.eventType || body.type;
-  if (eventType === "transfer.settled" || eventType === "settlement_confirmed") {
-    await enqueueJob("process-settlement-webhook", {
-      providerId,
-      eventId,
-      tenantId,
-      paymentRef: body.paymentRef || body.providerRef
-    }, { maxAttempts: 3, tenantId });
-  }
+    const eventType = body.eventType || body.type;
+    if (eventType === "transfer.settled" || eventType === "settlement_confirmed") {
+      await enqueueJob("process-settlement-webhook", {
+        providerId,
+        eventId,
+        tenantId,
+        paymentRef: body.paymentRef || body.providerRef
+      }, { maxAttempts: 3, tenantId });
+    }
 
-  return { status: "processed", eventId };
+    return { status: "processed", eventId };
+  });
 }

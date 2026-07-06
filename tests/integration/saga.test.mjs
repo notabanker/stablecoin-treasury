@@ -100,7 +100,18 @@ test("execution-time policy block moves payment to Failed instead of leaving it 
   assert.equal(second.status, 200);
 
   await api(stack.baseUrl, `/payments/${first.data.payment.id}/approve`, { method: "POST" });
-  await api(stack.baseUrl, `/payments/${first.data.payment.id}/approve`, { method: "POST" });
+  // V6 four-eyes: same approver twice is rejected. Insert a distinct second approval via DB
+  // so the test can exercise the full two-approval flow in dev mode.
+  await withDb(stack, async (client) => {
+    await client.query(
+      "INSERT INTO payment.payment_approvals (tenant_id, payment_id, approver_id, approver_display) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+      [DEFAULT_TENANT_ID, first.data.payment.id, "system:second-approver", "System (second approver)"]
+    );
+    await client.query(
+      "UPDATE payment.payments SET approvals = (SELECT COUNT(DISTINCT approver_id) FROM payment.payment_approvals WHERE payment_id = $1), status = 'Approved' WHERE id = $1 AND (SELECT COUNT(DISTINCT approver_id) FROM payment.payment_approvals WHERE payment_id = $1) >= required_approvals",
+      [first.data.payment.id]
+    );
+  });
   await api(stack.baseUrl, `/payments/${second.data.payment.id}/approve`, { method: "POST" });
 
   const executeFirst = await api(stack.baseUrl, `/payments/${first.data.payment.id}/execute`, { method: "POST" });

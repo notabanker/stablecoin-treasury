@@ -1,5 +1,7 @@
 # Corporate Stablecoin Treasury Platform
 
+[![CI](https://github.com/notabanker/stablecoin-treasury/actions/workflows/ci.yml/badge.svg)](https://github.com/notabanker/stablecoin-treasury/actions/workflows/ci.yml)
+
 Technology-only project folder for a MiCA-aligned corporate stablecoin treasury platform.
 
 ## Files
