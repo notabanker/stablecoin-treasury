@@ -11,7 +11,10 @@ jobs:
     env:
       DATABASE_ADMIN_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
       PGPASSWORD: postgres
-      SERVICE_DB_PASSWORD: postgres
+      # Must match the password migration 0033 bakes into the svc_* roles (the migration
+      # reads a Postgres GUC, not this env var — CI was the first environment to actually
+      # verify these passwords; local dev uses trust auth and never checks them).
+      SERVICE_DB_PASSWORD: service-dev-password
       DB_POOL_MAX: "2"
       TEST_STACK_READY_TIMEOUT_MS: "90000"
     services:

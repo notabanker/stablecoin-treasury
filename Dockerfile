@@ -1,9 +1,15 @@
 FROM node:20-alpine
 
+# Pick up Alpine security fixes newer than the base tag (e.g. openssl/libcrypto3).
+RUN apk upgrade --no-cache
+
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
-RUN npm install --omit=dev
+# npm is a build-time tool only: the services run under plain `node`, so the package
+# manager (and its bundled deps, a recurring CVE source) is removed from the runtime image.
+RUN npm install --omit=dev && \
+    rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /root/.npm
 
 COPY apps ./apps
 COPY packages ./packages
