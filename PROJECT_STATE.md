@@ -22,6 +22,7 @@ regression test, adversarial probe, DB invariant, or runbook; loop ends only wit
 
 ## Active References
 
+- `HANDOFF.md` — full-state catch-up for anyone joining (aggregates audit, completion report, lessons)
 - `README.md`
 - `TECHNICAL_TASKS.md`
 - `docs/ARCHITECTURE.md`
@@ -55,6 +56,17 @@ were never exercised by tests), plus a missing svc_gateway SELECT grant on platf
 Epic 5, 4.3, 7.1, 7.2, close-out.
 
 ## Session Log
+
+```text
+Date: 2026-07-06
+Agent: Fable5
+Task: Push to GitHub + CI repair
+Files changed: committed ec64725 (V6 checkpoint, 98 files), f2d241d (CI triggers on master — workflow only fired on PRs before; branches was [main] but repo uses master), 5fe4ce6 (SERVICE_DB_PASSWORD mismatch fix + Dockerfile hardening + untrack infra/.terraform)
+Tests run: local suite green pre-push; first-ever master-push CI run diagnosed: ALL integration tests failed at stack-ready timeout — svc_* role auth_failed because ci.yml set SERVICE_DB_PASSWORD=postgres while migration 0033 bakes 'service-dev-password' into the roles. KEY INSIGHT: local pg_hba is 'trust', so role passwords had NEVER been verified anywhere until this CI run. Trivy image-scan legitimately blocked on 14 HIGH CVEs (openssl base + npm's bundled deps) → fixed by apk upgrade + removing npm from the runtime image (services run plain node).
+Result: pushed; CI re-run for 5fe4ce6 pending (monitor armed).
+Next step: confirm CI green; then audit HIGH fixes (H1/H2/H3) or as directed.
+Human decisions needed: None for the push; audit fixes still await authorization.
+```
 
 ```text
 Date: 2026-07-06
