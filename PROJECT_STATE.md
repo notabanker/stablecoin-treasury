@@ -23,6 +23,7 @@ regression test, adversarial probe, DB invariant, or runbook; loop ends only wit
 ## Active References
 
 - `HANDOFF.md` — full-state catch-up for anyone joining (aggregates audit, completion report, lessons)
+- `docs/V6_JUDGE_INSTRUCTION.md` — prompt for an independent LLM to evaluate the work (blind verification, then grades the self-audit)
 - `README.md`
 - `TECHNICAL_TASKS.md`
 - `docs/ARCHITECTURE.md`
