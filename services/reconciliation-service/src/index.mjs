@@ -26,9 +26,10 @@ createJsonService({
       await query(DB, "SELECT 1");
       return ok({ status: "ready" });
     }, { public: true }),
-    route("POST", "/reset", async () => {
-      await reseedReconciliation();
-      return ok(await listReconciliation());
+    route("POST", "/reset", async ({ headers }) => {
+      const tenantId = tenantIdFromHeaders(headers);
+      await reseedReconciliation(tenantId);
+      return ok(await listReconciliation(tenantId));
     }),
     route("GET", "/reconciliation", async ({ headers }) => ok(await listReconciliation(tenantIdFromHeaders(headers)))),
     route("POST", "/reconciliation/matched", async ({ body, headers }) => {

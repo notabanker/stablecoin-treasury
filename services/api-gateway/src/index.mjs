@@ -6,7 +6,7 @@ import { authenticateUser, checkLoginRateLimit, clearLoginFailures, createSessio
 import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
 import { createJsonService, httpError, ok, route } from "../../../packages/shared/http.mjs";
 import { serviceGet, servicePost, serviceUrls } from "../../../packages/shared/service-client.mjs";
-import { validateProductionConfig } from "../../../packages/shared/config.mjs";
+import { validateProductionConfig, isDemoResetAllowed } from "../../../packages/shared/config.mjs";
 import { processWebhook, webhookMetrics } from "./webhooks.mjs";
 
 const port = Number(process.env.GATEWAY_PORT || process.env.PORT || 8080);
@@ -43,6 +43,9 @@ createJsonService({
       return { status: 200, body: { message: result.message }, cookies: result.cookies };
     })),
     route("POST", "/api/reset", perm("admin:reset")(async (ctx) => {
+      if (!isDemoResetAllowed()) {
+        throw httpError(403, "Demo reset is disabled in production. Set ALLOW_DEMO_RESET=true to enable.", "demo_reset_disabled");
+      }
       const options = tenantOptions(ctx);
       await Promise.all([
         servicePost("wallet", "/reset", {}, options),

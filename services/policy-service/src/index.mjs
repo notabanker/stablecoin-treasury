@@ -23,9 +23,10 @@ createJsonService({
       await query(DB, "SELECT 1");
       return ok({ status: "ready" });
     }, { public: true }),
-    route("POST", "/reset", async () => {
-      await reseedPolicy();
-      return ok(await loadPolicies());
+    route("POST", "/reset", async ({ headers }) => {
+      const tenantId = tenantIdFromHeaders(headers);
+      await reseedPolicy(tenantId);
+      return ok(await loadPolicies(tenantId));
     }),
     route("GET", "/policies", async ({ headers }) => ok(await loadPolicies(tenantIdFromHeaders(headers)))),
     route("POST", "/policies", async ({ body, headers }) => {

@@ -25,6 +25,7 @@
 | `PAYMENT_MUTATION_TIMEOUT_MS` | `10000` | Gateway timeout for payment create/approve/execute/cancel calls. Kept above the generic timeout so a slow money-path mutation does not return a false 504 after the payment service commits. |
 | `SERVICE_RETRIES` | `2` | Service call retries |
 | `RELAY_POLL_INTERVAL_MS` | `500` | Outbox poll interval |
+| `RELAY_MAX_RETRIES` | `5` | Max delivery attempts before an outbox event is dead-lettered (`dead_lettered_at` set, migration 0050). Was declared but unused before V8 Task 0.2 (audit finding H3); now enforced in `recordDeliveryAttempt`. Dead-lettered events are excluded from future polls and surfaced by the ops-watchdog "Outbox dead-letter queue non-empty" alert. |
 | `JOB_POLL_INTERVAL_MS` | `500` | Job poll interval |
 | `RATE_LIMIT_WINDOW_MS` | `1000` | Rate limit window |
 | `RATE_LIMIT_MAX` | `200` | General rate limit |
@@ -33,7 +34,7 @@
 | `LOGIN_RATE_LIMIT_MAX` | `5` | Max login failures |
 | `LOGIN_LOCKOUT_MS` | `300000` | Lockout duration |
 | `TRUST_PROXY_HEADERS` | unset | Honor `X-Forwarded-For` for client IP (see below) |
-| `ALLOW_DEMO_RESET` | unset | Allow reset in production |
+| `ALLOW_DEMO_RESET` | unset | Gates `POST /api/reset`. Ignored outside production (reset always allowed in dev/demo, incl. `npm run smoke`). When `PRODUCTION_MODE=true`, reset returns `403 demo_reset_disabled` unless this is exactly `true`. |
 | `SESSION_IDLE_TTL_MINUTES` | `0` (disabled) | Idle timeout: session expires after N minutes of inactivity. When set, `validateSession` bumps `expires_at` forward on each request (at most once per minute). |
 | `SESSION_ABSOLUTE_TTL_HOURS` | `24` | Absolute max session lifetime from `created_at`; idle-timeout bumps never exceed this cap. |
 | `WATCHDOG_INTERVAL_MS` | `60000` | Ops-watchdog evaluation interval. Set to `0` to disable watchdog scheduling. |

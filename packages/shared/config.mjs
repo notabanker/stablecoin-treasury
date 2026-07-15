@@ -1,5 +1,16 @@
 const PRODUCTION_MODE = process.env.PRODUCTION_MODE === "true";
 
+// Demo reset gate (V8 Task 0.1.1, audit finding H1). POST /api/reset destroys and reseeds
+// operational data (payments, wallets, the tenant audit trail). Outside production mode it is
+// a normal demo/dev convenience (and npm run smoke relies on it). In PRODUCTION_MODE it is
+// destructive and MUST stay off unless an operator explicitly opts in with
+// ALLOW_DEMO_RESET=true (exact match — any other value keeps it disabled, fail-closed).
+// Reads process.env at call time so tests and per-request checks see current values.
+export function isDemoResetAllowed() {
+  if (process.env.PRODUCTION_MODE !== "true") return true;
+  return process.env.ALLOW_DEMO_RESET === "true";
+}
+
 const SENSITIVE_KEYS = new Set([
   "INTERNAL_SERVICE_TOKEN", "WEBHOOK_SECRET", "DEMO_WEBHOOK_SECRET",
   "DATABASE_URL", "SESSION_COOKIE_SECRET"

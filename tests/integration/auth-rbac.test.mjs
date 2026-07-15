@@ -150,6 +150,240 @@ test("authenticated tenant context isolates state and supports tenant 2 payment 
   assert.equal(tenant1ApproveTenant2Payment.status, 404);
 });
 
+test("tenant-2 admin reset restores only the Nordic baseline and leaves tenant 1 unchanged", async (t) => {
+  const previousAuthRequired = process.env.AUTH_REQUIRED;
+  process.env.AUTH_REQUIRED = "true";
+  const stack = await startStack();
+  t.after(async () => {
+    if (previousAuthRequired === undefined) delete process.env.AUTH_REQUIRED;
+    else process.env.AUTH_REQUIRED = previousAuthRequired;
+    await stack.stop();
+  });
+
+  const tenant1Login = await login(stack.baseUrl, "marta@vega-industries.com");
+  const tenant2Login = await login(stack.baseUrl, "admin@nordic-holdings.com");
+  assert.equal(tenant1Login.status, 200);
+  assert.equal(tenant2Login.status, 200);
+
+  const tenant1Headers = { Authorization: `Bearer ${tenant1Login.data.session.token}` };
+  const tenant2Headers = { Authorization: `Bearer ${tenant2Login.data.session.token}` };
+
+  const tenant1Before = await api(stack.baseUrl, "/state", { headers: tenant1Headers });
+  assert.equal(tenant1Before.status, 200);
+
+  const tenant2Payment = await api(stack.baseUrl, "/payments", {
+    method: "POST",
+    headers: { ...tenant2Headers, "Idempotency-Key": "tenant2-reset-probe" },
+    body: JSON.stringify({
+      amount: 1000,
+      counterpartyId: "cp-nordic-steel",
+      sourceWalletId: "wal-nordic-eur",
+      type: "Supplier"
+    })
+  });
+  assert.equal(tenant2Payment.status, 200);
+
+  const pg = await import("pg");
+  const readSequence = async () => {
+    const client = new pg.Client({ connectionString: stack._env.DATABASE_URL });
+    await client.connect();
+    try {
+      const result = await client.query(
+        "SELECT last_value, is_called FROM payment.payment_reference_seq"
+      );
+      return result.rows[0];
+    } finally {
+      await client.end();
+    }
+  };
+  const sequenceBefore = await readSequence();
+
+  const reset = await api(stack.baseUrl, "/reset", {
+    method: "POST",
+    headers: tenant2Headers,
+    body: "{}"
+  });
+  assert.equal(reset.status, 200, JSON.stringify(reset.data));
+  assert.deepEqual(reset.data.state.degraded, []);
+
+  const tenant1After = await api(stack.baseUrl, "/state", { headers: tenant1Headers });
+  const tenant2After = await api(stack.baseUrl, "/state", { headers: tenant2Headers });
+  assert.equal(tenant1After.status, 200);
+  assert.equal(tenant2After.status, 200);
+
+  assert.deepEqual(
+    tenant1After.data.payments.map((payment) => payment.id).sort(),
+    tenant1Before.data.payments.map((payment) => payment.id).sort(),
+    "tenant-2 reset must not delete or reseed tenant-1 payments"
+  );
+  assert.deepEqual(
+    tenant1After.data.wallets.map((wallet) => wallet.id).sort(),
+    tenant1Before.data.wallets.map((wallet) => wallet.id).sort(),
+    "tenant-2 reset must not change tenant-1 wallets"
+  );
+  assert.deepEqual(
+    tenant1After.data.providers.map((provider) => provider.id).sort(),
+    tenant1Before.data.providers.map((provider) => provider.id).sort(),
+    "tenant-2 reset must not change tenant-1 providers"
+  );
+
+  assert.equal(tenant2After.data.payments.length, 0);
+  assert.equal(tenant2After.data.journalEntries.length, 0);
+  assert.equal(tenant2After.data.reconciliation.length, 0);
+  assert.deepEqual(
+    tenant2After.data.wallets.map((wallet) => wallet.id).sort(),
+    ["wal-nordic-eur", "wal-nordic-usd"]
+  );
+  assert.equal(
+    tenant2After.data.wallets.find((wallet) => wallet.id === "wal-nordic-eur")?.balance,
+    520000
+  );
+  assert.ok(tenant2After.data.counterparties.some((item) => item.id === "cp-nordic-steel"));
+  assert.ok(tenant2After.data.providers.some((item) => item.id === "prov-nordic-custody"));
+  assert.deepEqual(tenant2After.data.policies.allowedAssets, ["N-EURC", "N-USDC"]);
+
+  const sequenceAfter = await readSequence();
+  assert.deepEqual(
+    sequenceAfter,
+    sequenceBefore,
+    "tenant-scoped reset must not restart the global payment-reference sequence"
+  );
+});
+
+test("tenant-1 admin reset restores the Vega baseline and leaves tenant 2 unchanged", async (t) => {
+  const previousAuthRequired = process.env.AUTH_REQUIRED;
+  process.env.AUTH_REQUIRED = "true";
+  const stack = await startStack();
+  t.after(async () => {
+    if (previousAuthRequired === undefined) delete process.env.AUTH_REQUIRED;
+    else process.env.AUTH_REQUIRED = previousAuthRequired;
+    await stack.stop();
+  });
+
+  const tenant1Login = await login(stack.baseUrl, "marta@vega-industries.com");
+  const tenant2Login = await login(stack.baseUrl, "admin@nordic-holdings.com");
+  assert.equal(tenant1Login.status, 200);
+  assert.equal(tenant2Login.status, 200);
+
+  const tenant1Headers = { Authorization: `Bearer ${tenant1Login.data.session.token}` };
+  const tenant2Headers = { Authorization: `Bearer ${tenant2Login.data.session.token}` };
+
+  const tenant2Before = await api(stack.baseUrl, "/state", { headers: tenant2Headers });
+  assert.equal(tenant2Before.status, 200);
+
+  const tenant1Payment = await api(stack.baseUrl, "/payments", {
+    method: "POST",
+    headers: { ...tenant1Headers, "Idempotency-Key": "tenant1-reset-probe" },
+    body: JSON.stringify({
+      amount: 5000,
+      counterpartyId: "cp-nordic",
+      sourceWalletId: "wal-de-eur",
+      type: "Supplier"
+    })
+  });
+  assert.equal(tenant1Payment.status, 200);
+
+  const pg = await import("pg");
+  const readSequence = async () => {
+    const client = new pg.Client({ connectionString: stack._env.DATABASE_URL });
+    await client.connect();
+    try {
+      const result = await client.query(
+        "SELECT last_value, is_called FROM payment.payment_reference_seq"
+      );
+      return result.rows[0];
+    } finally {
+      await client.end();
+    }
+  };
+  const sequenceBefore = await readSequence();
+
+  const reset = await api(stack.baseUrl, "/reset", {
+    method: "POST",
+    headers: tenant1Headers,
+    body: "{}"
+  });
+  assert.equal(reset.status, 200, JSON.stringify(reset.data));
+  assert.deepEqual(reset.data.state.degraded, []);
+
+  const tenant1After = await api(stack.baseUrl, "/state", { headers: tenant1Headers });
+  const tenant2After = await api(stack.baseUrl, "/state", { headers: tenant2Headers });
+  assert.equal(tenant1After.status, 200);
+  assert.equal(tenant2After.status, 200);
+
+  assert.deepEqual(
+    tenant1After.data.payments.map((payment) => payment.id).sort(),
+    ["pay-1001", "pay-1002", "pay-1003", "pay-1004"],
+    "tenant-1 reset must restore the exact Vega baseline payment set"
+  );
+  assert.deepEqual(
+    tenant1After.data.wallets.map((wallet) => wallet.id).sort(),
+    ["wal-de-eur", "wal-hold-eur", "wal-nl-usd", "wal-pl-eur"],
+    "tenant-1 reset must restore the exact Vega baseline wallet set"
+  );
+
+  assert.deepEqual(
+    tenant2After.data.payments.map((payment) => payment.id).sort(),
+    tenant2Before.data.payments.map((payment) => payment.id).sort(),
+    "tenant-1 reset must not delete or reseed tenant-2 payments"
+  );
+  assert.deepEqual(
+    tenant2After.data.wallets.map((wallet) => wallet.id).sort(),
+    tenant2Before.data.wallets.map((wallet) => wallet.id).sort(),
+    "tenant-1 reset must not change tenant-2 wallets"
+  );
+  assert.equal(
+    tenant2After.data.wallets.find((wallet) => wallet.id === "wal-nordic-eur")?.balance,
+    tenant2Before.data.wallets.find((wallet) => wallet.id === "wal-nordic-eur")?.balance,
+    "tenant-1 reset must not change tenant-2 wallet balances"
+  );
+  assert.deepEqual(
+    tenant2After.data.providers.map((provider) => provider.id).sort(),
+    tenant2Before.data.providers.map((provider) => provider.id).sort(),
+    "tenant-1 reset must not change tenant-2 providers"
+  );
+
+  const sequenceAfter = await readSequence();
+  assert.deepEqual(
+    sequenceAfter,
+    sequenceBefore,
+    "tenant-scoped reset must not restart the global payment-reference sequence"
+  );
+});
+
+test("admin:reset is granted only to each tenant's Admin role, not broadened to a platform-operator role", async (t) => {
+  const stack = await startStack();
+  t.after(async () => {
+    await stack.stop();
+  });
+
+  const pg = await import("pg");
+  const client = new pg.Client({ connectionString: stack._env.DATABASE_URL });
+  await client.connect();
+  let rows;
+  try {
+    const result = await client.query(
+      `SELECT r.tenant_id, r.name AS role_name
+       FROM identity.role_permissions rp
+       JOIN identity.roles r ON r.id = rp.role_id
+       WHERE rp.permission = 'admin:reset'
+       ORDER BY r.tenant_id, r.name`
+    );
+    rows = result.rows;
+  } finally {
+    await client.end();
+  }
+
+  // Task 0.1.3 (approved 2026-07-12): admin:reset stays on each tenant's Admin role
+  // rather than moving to a new platform-operator role, because 0.1.2 made the reset
+  // operation itself caller-tenant-scoped. This test is the regression backstop for
+  // that decision: it fails the moment admin:reset is granted anywhere else.
+  assert.deepEqual(rows, [
+    { tenant_id: "00000000-0000-0000-0000-000000000001", role_name: "Admin" },
+    { tenant_id: "00000000-0000-0000-0000-000000000002", role_name: "Admin" }
+  ]);
+});
+
 test("dev auth mode honors a supplied session tenant instead of forcing the default tenant", async (t) => {
   const previousAuthRequired = process.env.AUTH_REQUIRED;
   delete process.env.AUTH_REQUIRED;

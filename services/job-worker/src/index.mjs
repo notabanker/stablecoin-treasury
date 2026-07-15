@@ -204,6 +204,18 @@ async function runWatchdog(tenantId) {
     threshold: 0
   });
 
+  // Outbox dead-letter queue (V8 0.2.3, audit finding H3)
+  const { rows: outboxDlqRows } = await query("platform",
+    "SELECT COUNT(*)::int AS count FROM platform.outbox_events WHERE dead_lettered_at IS NOT NULL"
+  );
+  const outboxDlqCount = outboxDlqRows[0]?.count || 0;
+  checks.push({
+    type: "outbox_dead_letter_queue",
+    title: "Outbox dead-letter queue non-empty",
+    count: outboxDlqCount,
+    threshold: 0
+  });
+
   // Oldest pending job
   const { rows: pendingRows } = await query("platform",
     `SELECT COALESCE(EXTRACT(EPOCH FROM NOW() - MIN(created_at)) * 1000, 0)::float AS age_ms
@@ -323,38 +335,67 @@ async function executePaymentSaga(paymentId, jobId, tenantId = DEFAULT_TENANT_ID
   await recordAttempt(paymentId, jobId, "policy_check", "success", null, tenantId);
 
   // Step 2: Provider submission (before debit — if the provider rejects, we never debit).
-  // Idempotent: if provider_ref already set from a previous crashed attempt, skip re-submission.
+  // Crash-safe (V8 Task 0.3, Finding 1 -- CRITICAL): payment.provider_submissions is inserted
+  // with a deterministic idempotency key (payment:<id>) BEFORE the external call. A crash
+  // between the provider accepting the transfer and this process persisting the result used to
+  // mean a retry called submitTransfer() again with no idempotency key -- a duplicate external
+  // transfer on a real rail. Now every attempt (first or retry) reuses the same key, and the
+  // provider's own idempotency guarantee (packages/shared/adapters/custody.mjs on the
+  // simulated rail) returns the already-accepted result instead of creating a new one.
   await recordAttempt(paymentId, jobId, "provider_submission", "started", null, tenantId);
   let providerRef = payment.providerRef;
   let chainRef = payment.chainRef;
   if (!providerRef) {
-    try {
-      const adapter = await resolveAdapter(context.providerId || context.provider?.id || "prov-arcadia");
-      if (!adapter) {
-        throw Object.assign(new Error("No custody adapter resolved"), { code: "adapter_unavailable" });
+    const providerId = context.providerId || context.provider?.id || "prov-arcadia";
+    const idempotencyKey = `payment:${paymentId}`;
+    const submission = await ensureProviderSubmission(tenantId, paymentId, providerId, idempotencyKey);
+    if (submission.status === "submitted" && submission.provider_ref) {
+      // Resuming a crashed attempt: the provider already has this transfer under our
+      // idempotency key. Reuse the recorded result -- do not call the adapter again.
+      providerRef = submission.provider_ref;
+      chainRef = submission.chain_ref;
+    } else {
+      try {
+        const adapter = await resolveAdapter(providerId);
+        if (!adapter) {
+          throw Object.assign(new Error("No custody adapter resolved"), { code: "adapter_unavailable" });
+        }
+        const result = await withBreaker(
+          providerId,
+          () => adapter.submitTransfer({ payment, context, idempotencyKey })
+        );
+        providerRef = result.providerRef;
+        chainRef = result.chainRef;
+        await query(PB,
+          "UPDATE payment.provider_submissions SET status = 'submitted', provider_ref = $1, chain_ref = $2, updated_at = now() WHERE id = $3",
+          [providerRef, chainRef, submission.id]
+        );
+      } catch (error) {
+        await query(PB,
+          "UPDATE payment.provider_submissions SET status = 'failed', last_error = $1, updated_at = now() WHERE id = $2",
+          [error.message, submission.id]
+        );
+        await recordAttempt(paymentId, jobId, "provider_submission", "error", error.message, tenantId);
+        await query(PB, "UPDATE payment.payments SET status = 'Failed' WHERE id = $1 AND tenant_id = $2 AND status = 'Executing'", [
+          paymentId, tenantId
+        ]);
+        return;
       }
-      const result = await withBreaker(
-        context.providerId || context.provider?.id || "prov-arcadia",
-        () => adapter.submitTransfer({ payment, context })
-      );
-      providerRef = result.providerRef;
-      chainRef = result.chainRef;
-      await query(
-        PB,
-        "UPDATE payment.payments SET provider_ref = $1, chain_ref = $2 WHERE id = $3 AND tenant_id = $4",
-        [providerRef, chainRef, paymentId, tenantId]
-      );
-    } catch (error) {
-      await recordAttempt(paymentId, jobId, "provider_submission", "error", error.message, tenantId);
-      await query(PB, "UPDATE payment.payments SET status = 'Failed' WHERE id = $1 AND tenant_id = $2 AND status = 'Executing'", [
-        paymentId, tenantId
-      ]);
-      return;
     }
+    await query(
+      PB,
+      "UPDATE payment.payments SET provider_ref = $1, chain_ref = $2 WHERE id = $3 AND tenant_id = $4",
+      [providerRef, chainRef, paymentId, tenantId]
+    );
   }
   await recordAttempt(paymentId, jobId, "provider_submission", "success", null, tenantId);
 
   // Step 3: Ledger debit (idempotent by idempotency_key, after provider ref is persisted).
+  // By this point the provider has already accepted the transfer (Step 2 either set
+  // providerRef or returned early as Failed), so a debit failure here must NOT mark the
+  // payment Failed -- that would silently lose the fact that external money already moved
+  // (Finding 1's second failure mode). Leaving the payment in Executing surfaces it on the
+  // existing GET /api/repair list instead.
   await recordAttempt(paymentId, jobId, "ledger_debit", "started", null, tenantId);
   const destinationWallet = context.wallets.find(
     (candidate) =>
@@ -377,9 +418,6 @@ async function executePaymentSaga(paymentId, jobId, tenantId = DEFAULT_TENANT_ID
     await recordAttempt(paymentId, jobId, "ledger_debit", "success", null, tenantId);
   } catch (error) {
     await recordAttempt(paymentId, jobId, "ledger_debit", "error", error.message, tenantId);
-    await query(PB, "UPDATE payment.payments SET status = 'Failed' WHERE id = $1 AND tenant_id = $2 AND status = 'Executing'", [
-      paymentId, tenantId
-    ]);
     throw error;
   }
 
@@ -488,6 +526,26 @@ async function recordAttempt(paymentId, jobId, step, outcome, error = null, tena
      VALUES ($1, $2, $3, $4, $5, $6)`,
     [tenantId, paymentId, jobId, step, outcome, error]
   );
+}
+
+// V8 Task 0.3.1/0.3.3 (Finding 1): insert-or-get the durable pre-commit submission row for this
+// payment, before any external call. UNIQUE(tenant_id, payment_id) makes this safe to call on
+// every attempt (first or retry) -- ON CONFLICT DO NOTHING plus a re-select returns the existing
+// row, so a crashed prior attempt's idempotency_key and status are always what the caller sees.
+async function ensureProviderSubmission(tenantId, paymentId, providerId, idempotencyKey) {
+  await query(
+    "payment",
+    `INSERT INTO payment.provider_submissions (tenant_id, payment_id, provider_id, idempotency_key)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (tenant_id, payment_id) DO NOTHING`,
+    [tenantId, paymentId, providerId, idempotencyKey]
+  );
+  const { rows } = await query(
+    "payment",
+    "SELECT * FROM payment.provider_submissions WHERE tenant_id = $1 AND payment_id = $2",
+    [tenantId, paymentId]
+  );
+  return rows[0];
 }
 
 function sleep(ms) {

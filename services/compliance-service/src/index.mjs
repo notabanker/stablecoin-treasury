@@ -26,9 +26,10 @@ createJsonService({
       await query(DB, "SELECT 1");
       return ok({ status: "ready" });
     }, { public: true }),
-    route("POST", "/reset", async () => {
-      await reseedCounterparties();
-      return ok(await listCounterparties());
+    route("POST", "/reset", async ({ headers }) => {
+      const tenantId = tenantIdFromHeaders(headers);
+      await reseedCounterparties(tenantId);
+      return ok(await listCounterparties(tenantId));
     }),
     route("GET", "/counterparties", async ({ headers }) => ok(await listCounterparties(tenantIdFromHeaders(headers)))),
     route("GET", "/counterparties/:id", async ({ params, headers }) => ok(await findCounterparty(params.id, tenantIdFromHeaders(headers)))),

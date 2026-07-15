@@ -9,19 +9,48 @@ All approval gates A1–A6 are APPROVED (see § V6 Gate Status).
 
 ## Current Task
 
-Epic 5.2 (statement ingestion + matching) complete. Remaining per
-`docs/V6_REMAINING_TASKS_INSTRUCTION.md`: Task 4.3 (ADR-011 OIDC decision), Task 7.1
-(container hardening, CI scan, env shapes, Terraform skeleton), Task 7.2 (external
-tracker table in PRODUCTION_READINESS), V6 close-out (V6_COMPLETION_REPORT.md).
-Task 5.3 (real rail) stays externally blocked.
+**V8 Phase 0** per `docs/V8_TASK_LIST.md` — Epic 0.1 nearly done. **0.1.1 done** (`ALLOW_DEMO_RESET`
+gate). **0.1.2 done** (tenant-scoped reseeds): caller tenant only, Nordic tenant-2 baseline,
+unknown tenants empty, identity/RBAC untouched, and no global payment-reference sequence reset.
+**0.1.3 done**: kept `admin:reset` on each tenant's Admin role (approved 2026-07-12 — reset is
+already caller-tenant-scoped via 0.1.2, so no platform-operator role needed); formalized with two
+regression tests (symmetric tenant-1↔tenant-2 reset isolation, and an RBAC-surface bite test
+asserting admin:reset is granted to exactly {tenant-1 Admin, tenant-2 Admin}).
+**0.1.4 BLOCKED**: adversarial HTTP test needs a live gateway booted with `PRODUCTION_MODE=true`
+passing `validateProductionConfig` (packages/shared/config.mjs:29, hard synchronous throw at
+services/api-gateway/src/index.mjs:17), which requires a `DATABASE_URL` not containing
+"127.0.0.1"/"localhost"/"treasury_dev". Verified the IPv6-loopback workaround (`[::1]`, which the
+local Postgres server itself accepts) does NOT work: this project's `pg` connection-string parser
+fails on bracketed IPv6 (`getaddrinfo ENOTFOUND [::1]`) even though `pg.Client({host:"::1"})`
+with discrete fields works fine — see session log below for the three options. Needs Flo's
+decision before proceeding; not improvised. **Epic 0.2 done** (0.2.1–0.2.5, outbox DLQ / H3):
+dead-lettering + exponential backoff on `platform.outbox_events`, watchdog alert, poison-batch
+regression test. 0.2.6 (replay tool) deferred, P1. **Epic 0.3 done** (0.3.1–0.3.6,
+`provider_submissions` crash-safety, G1, Finding 1 — CRITICAL): closes the duplicate-external-
+transfer risk and the silent-Failed-with-lost-external-state bug (136/136 suite). Next: Epic 0.4
+(config/auth/integrity hardening — 0.4.1/0.4.2 are P0). V6 close-out items (7.1, 7.2) may run in
+parallel if they do not block
+Phase 0. Task 5.3 (real rail) stays externally blocked until E1 custody partner + E2 secrets manager.
 
 ## Acceptance Criteria
 
 Per-epic criteria are defined in `docs/V6_PLAN.md`. Blanket rule unchanged: every claim needs a
 regression test, adversarial probe, DB invariant, or runbook; loop ends only with runtime proof.
 
+## V8 Planning (product evolution)
+
+Strategic pivot: governance/control plane → **settlement + treasury service** (SMB + corporate).
+Full plan: `docs/V8_IMPLEMENTATION_PLAN.md` · task checklist: `docs/V8_TASK_LIST.md`.
+**Phase 0 authorized** (2026-07-12): implement money-path safety before Phase 1 product work.
+**Locked decisions:** see `docs/V8_FINAL_PLAN.md` §2 — sevdesk, Doppler (E2), Circle sandbox (E1), G1/G2/G4/G5 approved.
+Phase 1 blocked on: Phase 0 exit + Doppler setup + Circle sandbox access.
+
 ## Active References
 
+- `docs/V8_EXECUTION_INSTRUCTION.md` — **copy-paste prompt for another coding LLM**
+- `docs/V8_FINAL_PLAN.md` — authoritative summary (decisions + phases + next steps)
+- `docs/V8_IMPLEMENTATION_PLAN.md` — full epic/task specification
+- `docs/V8_TASK_LIST.md` — stable task IDs and checkboxes for V8
 - `HANDOFF.md` — full-state catch-up for anyone joining (aggregates audit, completion report, lessons)
 - `docs/V6_JUDGE_INSTRUCTION.md` — prompt for an independent LLM to evaluate the work (blind verification, then grades the self-audit)
 - `README.md`
@@ -265,6 +294,21 @@ current session prompt — then update this section immediately). See
 | A5 | Adapter interface + `providers` columns (Epic 5) | APPROVED |
 | A6 | Infra ADRs: secrets manager, IaC tool, runtime target; OIDC scope (Epic 7, 4.3, 5.3) | APPROVED |
 
+## V8 Gate Status
+
+| Gate | Scope | Status |
+|---|---|---|
+| G1 | `payment.provider_submissions` + crash-safe settlement semantics (Phase 0 Epic 0.3) | **APPROVED** (2026-07-12) |
+| G2 | Tenant tier + feature flags (SMB shell) | **APPROVED** (2026-07-12) |
+| G3 | Fiat accounts + unified ledger | PENDING (Phase 2) |
+| G4 | Integrations schema + ERP OAuth (sevdesk) | **APPROVED** (2026-07-12) |
+| G5 | Tiered KYC/AML (SMB onboarding) | **APPROVED** (2026-07-12) |
+| G6 | API keys + machine auth | PENDING (Phase 1 end) |
+| G7 | Fiat rail adapter | PENDING |
+| G8 | Liquidity/yield | PENDING |
+| G9 | Multi-jurisdiction + residency | PENDING |
+| G10 | Embedded / white-label | PENDING |
+
 ## Known Issues / Watch Points
 
 - Do not assume production readiness just because the demo flow works.
@@ -295,6 +339,91 @@ current session prompt — then update this section immediately). See
 
 Add newest entries at the top.
 
+```text
+Date: 2026-07-12
+Agent: Claude
+Task: V8 Task 0.1.3 — admin:reset scope fix; investigated 0.1.4
+Files changed: tests/integration/auth-rbac.test.mjs (+2 tests: "tenant-1 admin reset restores the Vega baseline and leaves tenant 2 unchanged" — symmetric mirror of the existing tenant-2 test, proves the tenant-1 direction too, including payment_reference_seq unchanged; "admin:reset is granted only to each tenant's Admin role, not broadened to a platform-operator role" — direct RBAC-surface query asserting exactly {tenant-1 Admin, tenant-2 Admin} hold admin:reset); docs/V8_TASK_LIST.md (0.1.3 ticked, 0.1.4 marked BLOCKED); PROJECT_STATE.md; HANDOFF.md
+Tests run: narrow (both new tests) 2/2; npm run check pass (known 0017 dup only); npm run test:all 132/132 (53 unit + 75 integration + 4 concurrency, up from 130); production-shaped npm run check pass; migrate + dev health/ready + smoke pass; 5 DB invariants all 0 (incl. approvals-integrity, which the earlier session's 4-query block omitted); verify-audit-chain ok ({"ok":true,"checkedRows":10}); dev stack stopped cleanly after
+Result: 0.1.3 PASS, no permission change made (per instruction and AGENTS.md auth/RBAC approval gate — this task was scoped as test-only from the start, matching Flo's 2026-07-12 decision recorded in the prior session). Decision I did NOT make unilaterally: whether admin:reset should ever move to a platform-operator role — explicitly out of scope per instruction.
+0.1.4 investigation (no code changed, no test added — genuinely blocked): the adversarial "production mode + no ALLOW_DEMO_RESET -> 403" test needs a live gateway that (a) boots past validateProductionConfig (packages/shared/config.mjs:29, called synchronously at services/api-gateway/src/index.mjs:17 — throws and crashes boot on failure) and (b) has a real authenticated admin session, since isDemoResetAllowed() is checked inside perm("admin:reset") after login+RBAC, which need a live DB. validateProductionConfig rejects any DATABASE_URL containing "127.0.0.1", "localhost", or "treasury_dev" (config.mjs:47-51) — a pure string check, not a connectivity check. I tested the obvious workaround: pointing DATABASE_ADMIN_URL at the IPv6 loopback ([::1]) instead. The Postgres server itself accepts it (verified: psql "postgres://[::1]:5432/postgres" -c "select 1" succeeds, and node pg.Client({host:"::1",...}) succeeds), but this project's pg connection-string URI parser does not: pg.Client({connectionString:"postgres://[::1]:5432/postgres"}) fails with "getaddrinfo ENOTFOUND [::1]" (brackets included in the literal DNS lookup — a known pg-connection-string limitation with bracketed IPv6). Since tests/helpers/stack.mjs and every service build DATABASE_URL as a connection-string (never discrete host/port fields), this is a real dead end, not a mistake on my part.
+Options for Flo (did not pick one — this is an infra/test-architecture decision, not a code fix):
+  A) Point the test DB at genuinely non-local infrastructure (e.g. a Dockerized Postgres reachable by container hostname) — honest, but adds a new dependency to the test suite (Docker must be running).
+  B) Add a narrow, explicitly-named test-only exception to validateProductionConfig's DB-locality check (e.g. recognizing the treasury_test_ prefix stack.mjs already uses for ephemeral DBs) — touches the production config gate itself, so needs sign-off even though it would be narrow; this is the kind of auth/production-policy change AGENTS.md reserves for Flo.
+  C) Test only the route-wiring (perm("admin:reset") + isDemoResetAllowed() composition) at a level below full HTTP, skipping validateProductionConfig's DB check entirely — cheaper but weaker: HANDOFF.md/V8_EXECUTION_INSTRUCTION.md both ask specifically for an HTTP-level adversarial test, and 0.1.1's unit tests already cover isDemoResetAllowed() in isolation, so this would mostly re-test what 0.1.1 already proved rather than closing the real gap (route wiring under a live boot).
+I did not attempt a numeric-shorthand IP trick (e.g. "127.1") to dodge the substring check — it would pass the string check while still literally being local dev infrastructure, which defeats the point of the check and would be exactly the kind of test-theater a later adversarial review (docs/V6_JUDGE_INSTRUCTION.md-style) would flag.
+Next step: Flo picks A/B/C (or another option) for 0.1.4; then Epic 0.2 (outbox DLQ, H3).
+Human decisions needed: 0.1.4 unblocker choice (A/B/C above).
+```
+
+```text
+Date: 2026-07-12
+Agent: Claude
+Task: V8 Epic 0.2 — outbox DLQ / poison-event handling (audit finding H3)
+Files changed: db/migrations/0050_outbox_dead_letter.sql (new: attempts, last_error, dead_lettered_at on platform.outbox_events; replaces the unpublished partial index to exclude dead-lettered rows), db/migrations/0051_outbox_backoff.sql (new: next_attempt_at, added after realizing 0.2.2 explicitly requires backoff, not just a counter), services/relay-worker/src/index.mjs (recordDeliveryAttempt now real: increments attempts, records last_error, dead-letters at RELAY_MAX_RETRIES — wiring up a constant that was declared but never used before this task — schedules exponential backoff otherwise; getUnpublishedEvents excludes dead-lettered and not-yet-eligible rows; /metrics gains deadLettered + deadLetterCount), services/job-worker/src/index.mjs (runWatchdog gains an "Outbox dead-letter queue non-empty" check, mirroring the existing platform.jobs DLQ check), tests/integration/outbox-dlq.test.mjs (new, 2 tests: 20-poison-event batch-starvation reproduction proving good events still deliver and the poison batch dead-letters instead of retrying forever; backoff-scheduling check), docs/RUNBOOKS.md (Outbox Delivery Failure section rewritten to match the new columns/remediation), docs/ENVIRONMENT.md (documents RELAY_MAX_RETRIES, previously undocumented dead code), docs/V8_TASK_LIST.md, PROJECT_STATE.md
+Tests run: narrow (both new tests) 2/2 in isolation; npm run check pass (known 0017 dup only) x2 (after each migration); npm run test:all 134/134 (53 unit + 77 integration + 4 concurrency, up from 132) after both migrations applied; production-shaped npm run check pass; migrate + dev health/ready + smoke pass; all 5 DB invariants zero; verify-audit-chain ok; dev stack stopped cleanly
+Result: PASS. H3 closed: reproduced the exact documented failure mode (20 permanently-failing events occupying the full BATCH_SIZE=20 LIMIT forever, starving delivery for everyone) and proved the fix — poison events dead-letter after RELAY_MAX_RETRIES attempts (default 5) and are excluded from future polls, freeing the queue for events behind them. First test-writing attempt hit the exact same long-lived-DB-probe-connection bug Codex documented in the 0.1.2 handoff (57P01 "terminating connection due to administrator command") — fixed by switching to short-lived per-query connections, matching the established pattern in auth-rbac.test.mjs. 0.2.6 (DLQ replay tool, P1) deliberately not built — not required for Phase 0 exit, no manual remediation path exists yet beyond the documented "clear dead_lettered_at, reset attempts=0" runbook step.
+Next step: Epic 0.3 (provider_submissions crash-safety, G1 approved) is the next P0 work; 0.1.4 still needs Flo's A/B/C decision.
+Human decisions needed: 0.1.4 unblocker choice (unchanged, still open).
+```
+
+```text
+Date: 2026-07-12
+Agent: Claude
+Task: V8 Epic 0.3 — provider_submissions crash-safety (Gate G1, LLM_TECHNICAL_HANDOFF_OPEN_FINDINGS.md Finding 1, CRITICAL)
+Files changed: db/migrations/0052_provider_submissions.sql (new: payment.provider_submissions -- tenant_id, payment_id (TEXT FK ON DELETE CASCADE), provider_id, idempotency_key, status, provider_ref, chain_ref, last_error, timestamps; UNIQUE(tenant_id,payment_id) + UNIQUE(tenant_id,provider_id,idempotency_key); RLS tenant_isolation policy; explicit SELECT/INSERT/UPDATE grants to svc_payment + svc_job since the 0033 blanket grant only covers tables that existed then), packages/shared/adapters/custody.mjs (SimulatedCustodyAdapter now honors request.idempotencyKey via an in-memory map, returning the same result on repeat calls instead of a fresh random ref; added CrashOnceThenIdempotentAdapter, a test-only double gated behind CUSTODY_TEST_CRASH_ADAPTER=true that records a transfer as provider-accepted then throws on its first call, mirroring a real ambiguous-outcome failure; FIXED a latent bug found while testing this -- resolveAdapter() called the registry factory fresh on every invocation, so adapter-held idempotency state was silently discarded across a crash+retry, which is two separate saga runs and thus two separate resolveAdapter() calls; adapter instances are now memoized per adapter key), services/job-worker/src/index.mjs (executePaymentSaga Step 2 rewritten: ensureProviderSubmission() inserts a pending row with idempotency_key=`payment:<id>` before calling the adapter; resumes from a submitted row's recorded provider_ref instead of re-calling the adapter when possible, otherwise resubmits with the SAME key; Step 3's catch block no longer marks the payment Failed on a ledger-debit failure, because by that point the provider has already accepted the transfer -- marking Failed would silently lose that external state, so the payment now stays Executing and surfaces on the existing GET /api/repair list), tests/integration/provider-crash-safety.test.mjs (new, 2 tests: crash-then-retry proves the retry reuses the deterministic idempotency key and settles with the SAME provider_ref rather than creating a new submission; debit-fails-after-provider-succeeds proves the payment stays Executing with provider_ref intact and appears on /repair rather than being silently marked Failed), docs/V8_TASK_LIST.md, PROJECT_STATE.md
+Tests run: narrow (both new tests) 2/2 in isolation (first run of test 1 failed with a 15s timeout, root-caused to the resolveAdapter memoization bug above -- not a flake, a real design gap the test caught); npm run check pass (known 0017 dup only); npm run test:all 136/136 (53 unit + 79 integration + 4 concurrency, up from 134); production-shaped npm run check pass; migrate + dev health/ready + smoke pass; all 5 DB invariants zero; verify-audit-chain ok ({"ok":true,"checkedRows":10}); dev stack stopped cleanly
+Result: PASS. Closes the CRITICAL finding (duplicate external transfer risk on crash/retry) and the second failure mode (provider-accepted-but-debit-failed silently marked Failed, losing external state). Deliberately did NOT add a new payment status (e.g. ProviderSubmitted/SettlementPending) -- reused the existing Executing status + GET /api/repair mechanism, which already exists and is already tested, keeping this change out of "new payment-state-machine semantics" territory per AGENTS.md's approval-gate list (G1's approved scope explicitly includes "crash-safe settlement semantics," which this satisfies without a state-machine change). Retry-safety relies on the SAME idempotency key being resubmitted to the provider on every attempt (not a "check status first" short-circuit for the ambiguous-throw case) -- this matches how real idempotent provider APIs (Stripe-style Idempotency-Key) are meant to be used and is the documented "reconcile by provider idempotency key" option from Finding 1, not a workaround.
+Next step: Epic 0.4 (config/auth/integrity hardening: 0.4.1 SERVICE_DB_PASSWORD gate, 0.4.2 creator!=approver DB constraint are P0; rest P1/P2) is the next P0 work; 0.1.4 still needs Flo's A/B/C decision.
+Human decisions needed: 0.1.4 unblocker choice (unchanged, still open). Session cost is now high (~$79) -- pausing here rather than auto-continuing to Epic 0.4.
+```
+
+```text
+Date: 2026-07-12
+Agent: Codex
+Task: V8 Task 0.1.2 — tenant-scoped reseeds (audit H2)
+Files changed: packages/shared/data.mjs (tenant-specific seed profiles: Vega, Nordic, empty fallback); all seven services/{wallet,policy,compliance,payment,accounting,operations,reconciliation}-service/src/{index,seed}.mjs (derive caller tenant from signed internal header and delete/reseed only that tenant); services/payment-service/src/seed.mjs (removed cross-tenant global sequence restart); tests/integration/auth-rbac.test.mjs (authenticated tenant-2 adversarial reset); tests/unit/config.test.mjs (unique import nonce repairs a proven prior-session config-test cache flake); docs/V8_TASK_LIST.md, PROJECT_STATE.md
+Tests run: focused tenant-2 reset test 1/1; npm run check pass (known 0017 duplicate only); npm run test:all 130/130 (53 unit + 73 integration + 4 concurrency); production-shaped npm run check pass; migrate + dev health/ready + smoke pass; 5 DB invariants all 0; verify-audit-chain ok (9 rows, exit 0); git diff --check pass
+Result: PASS. Tenant-2 admin reset restores the Nordic provider/entity/asset/wallet/balance/policy/counterparty/audit baseline, clears tenant-2 payments/journals/reconciliation (no approved fixtures), and leaves tenant-1 payment, wallet, and provider IDs unchanged. The test also proves payment_reference_seq is unchanged by reset. Unknown tenants receive an empty operational reset and never inherit Vega IDs. Identity/RBAC is deliberately untouched.
+Repair feedback: first full suite attempt exposed Date.now()-based ESM cache-key collision in the 0.1.1 config tests; a monotonic import nonce fixed it and two consecutive unit runs passed before the full suite.
+Next step: Task 0.1.3 — decide whether tenant-scoped admin:reset is sufficient or whether the permission should be restricted to a platform-operator role; this is an auth/RBAC policy decision requiring Flo approval. Then 0.1.4 production-mode HTTP adversarial test.
+Human decisions needed: 0.1.3 permission policy (recommend keep tenant Admin permission because reset is now strictly tenant-scoped; add explicit RBAC regression rather than introduce a new platform-operator role in Phase 0).
+```
+
+```text
+Date: 2026-07-12
+Agent: opencode
+Task: V8 Task 0.1.1 — ALLOW_DEMO_RESET production gate on POST /api/reset (audit H1)
+Files changed: packages/shared/config.mjs (new isDemoResetAllowed() — fail-closed: reset allowed outside PRODUCTION_MODE, and in production only when ALLOW_DEMO_RESET==="true" exactly), services/api-gateway/src/index.mjs (import + 403 demo_reset_disabled gate at the top of the /api/reset handler, before tenant fan-out), tests/unit/config.test.mjs (+4 tests: dev allows, prod-unset blocks, prod non-"true" values block, prod "true" allows), docs/ENVIRONMENT.md (ALLOW_DEMO_RESET row now states exact prod-only semantics), docs/V8_TASK_LIST.md (0.1.1 ticked)
+Tests run: check (pass, exit 0, known 0017 dup), test:all 129/129 (53 unit incl. +4 new + 72 integration + 4 concurrency), migrate + dev + smoke (pass — dev-mode reset still works, gate is prod-only), 5 DB invariants all 0, verify-audit-chain ok exit 0 (on a freshly recreated treasury_dev; see note), acceptance grep shows implementation sites in packages/ + services/
+Result: PASS. TDD red→green: new unit tests failed with "isDemoResetAllowed is not a function", then passed after implementation. Gate is the falsifiable regression for H1. Design note: the full adversarial *HTTP* test (Task 0.1.4) can't boot a PRODUCTION_MODE gateway locally because validateProductionConfig correctly rejects a localhost/treasury_dev DATABASE_URL at boot — verified that exact boot rejection. So 0.1.1's regression lives at the config-decision layer (unit) + code wiring; 0.1.4 will need either a non-localhost test DB or a seam to exercise the gate over HTTP without a real prod DB. Did NOT touch reseed tenant-scoping — that is 0.1.2 (H2), deliberately left for the next task.
+Environment note: treasury_dev carried a stale `TAMPERED` audit row (aud-nordic-seed-1, tenant-2, dated 2026-07-03) from an earlier session's tamper probe, which made verify-audit-chain exit 1 before I recreated the DB. It is dev-DB pollution, not a code regression (my diff touches no audit code; demo reset only reseeds tenant-1 so it never heals tenant-2). Recreated treasury_dev clean → chain verifies ok. Watch point for anyone reusing this dev DB.
+Next step: Task 0.1.2 — parameterize all */seed.mjs reseeds by caller tenant_id (H2), then 0.1.3 admin:reset scope, then 0.1.4 adversarial test.
+Human decisions needed: None (Phase 0 authorized; no gate needed for 0.1.1). Flag for 0.1.4: decide how to run the production-reset HTTP assertion given the localhost DB-URL prod-gate (test DB host vs. gate seam).
+```
+
+```text
+Date: 2026-07-12
+Agent: Grok
+Task: V8 final plan published — all core decisions locked
+Files changed: docs/V8_FINAL_PLAN.md (new), PROJECT_STATE.md
+Tests run: none
+Result: Final plan §2 locks sevdesk, Doppler, Circle, G1/G2/G4/G5; Phase 0→1→2→3 sequence + exit criteria + next steps
+Next step: Engineering Epic 0.1; parallel Doppler + Circle sandbox + sevdesk dev app
+Human decisions needed: Phase 2 only (E3 EMI, G3/G7, DATEV path)
+```
+
+```text
+Date: 2026-07-12
+Agent: Grok
+Task: V8 implementation plan — settlement + treasury service (SMB → corporate)
+Files changed: docs/V8_IMPLEMENTATION_PLAN.md (new), docs/V8_TASK_LIST.md (new), PROJECT_STATE.md
+Tests run: none (planning docs only)
+Result: Detailed phased plan (0–3) merging strategic pivot, V6/V7 audit findings, architecture, integrations, compliance, UX, GTM, competitive matrix, 24 user stories, 10 approval gates
+Next step: Human review of plan; authorize Phase 0 (0.1–0.3 + G1 for provider_submissions); or begin V6 close-out items still open
+Human decisions needed: Approve V8 scope; approve gates G1–G10 per epic; select Phase 1 accounting connector (Xero vs QBO); custody sandbox partner (E1)
+```
+
 Template:
 
 ```text
@@ -307,4 +436,3 @@ Result:
 Next step:
 Human decisions needed:
 ```
-

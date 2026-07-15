@@ -1,3 +1,7 @@
+import { DEFAULT_TENANT_ID } from "./tenant.mjs";
+
+const NORDIC_DEMO_TENANT_ID = "00000000-0000-0000-0000-000000000002";
+
 export const ratesToEur = {
   EURC: 1,
   EURI: 1,
@@ -7,7 +11,10 @@ export const ratesToEur = {
   USDG: 0.92
 };
 
-export function createSeedData() {
+export function createSeedData(tenantId = DEFAULT_TENANT_ID) {
+  if (tenantId === NORDIC_DEMO_TENANT_ID) return createNordicSeedData();
+  if (tenantId !== DEFAULT_TENANT_ID) return createEmptySeedData();
+
   const now = new Date().toISOString();
   return {
     lastUpdated: now,
@@ -416,6 +423,108 @@ export function createSeedData() {
         status: "Open"
       }
     ]
+  };
+}
+
+function createNordicSeedData() {
+  const now = new Date().toISOString();
+  return {
+    lastUpdated: now,
+    currentUser: null,
+    policies: {
+      approvalThreshold: 40000,
+      secondApprovalThreshold: 200000,
+      hardTransferLimit: 500000,
+      concentrationLimit: 0.65,
+      allowedAssets: ["N-EURC", "N-USDC"],
+      allowedProviders: ["prov-nordic-custody", "prov-nordic-fx"],
+      requireScreening: true
+    },
+    entities: [
+      { id: "ent-nordic-hold", name: "Nordic Holdings AB", jurisdiction: "SE", baseCurrency: "EUR", erpCode: "NORDIC-0001" },
+      { id: "ent-nordic-fi", name: "Nordic Finland Oy", jurisdiction: "FI", baseCurrency: "EUR", erpCode: "NORDIC-2100" }
+    ],
+    assets: [
+      {
+        id: "N-EURC", name: "Nordic Euro EMT", currency: "EUR", issuer: "Nordic EMI",
+        chain: "Polygon", classification: "Cash equivalent", status: "Enabled", risk: "Low",
+        providerId: "prov-nordic-custody"
+      },
+      {
+        id: "N-USDC", name: "Nordic USD Stablecoin", currency: "USD", issuer: "Circle",
+        chain: "Ethereum", classification: "Financial asset", status: "Enabled", risk: "Medium",
+        providerId: "prov-nordic-fx"
+      }
+    ],
+    providers: [
+      {
+        id: "prov-nordic-custody", name: "Nordic Custody Bank", type: "Custody and settlement",
+        jurisdiction: "SE", authority: "Finansinspektionen", status: "Operational", latencyMs: 365,
+        uptime: 99.94, assets: ["N-EURC", "N-USDC"], routes: ["Nordic supplier rail", "SEPA off-ramp"], incident: ""
+      },
+      {
+        id: "prov-nordic-fx", name: "Nordic FX Desk", type: "FX and conversion",
+        jurisdiction: "DK", authority: "Danish FSA", status: "Operational", latencyMs: 430,
+        uptime: 99.88, assets: ["N-USDC", "N-EURC"], routes: ["EUR/USD", "USD/EUR"], incident: ""
+      },
+      {
+        id: "prov-nordic-screen", name: "Nordic Screening Node", type: "AML and sanctions",
+        jurisdiction: "SE", authority: "Finansinspektionen", status: "Operational", latencyMs: 250,
+        uptime: 99.97, assets: [], routes: ["Address screening"], incident: ""
+      }
+    ],
+    wallets: [
+      {
+        id: "wal-nordic-eur", entityId: "ent-nordic-hold", providerId: "prov-nordic-custody",
+        asset: "N-EURC", address: "0xnd01...e001", custody: "Segregated client account",
+        status: "Active", balance: 520000
+      },
+      {
+        id: "wal-nordic-usd", entityId: "ent-nordic-fi", providerId: "prov-nordic-fx",
+        asset: "N-USDC", address: "0xnd02...u001", custody: "Partner CASP wallet",
+        status: "Active", balance: 180000
+      }
+    ],
+    counterparties: [
+      {
+        id: "cp-nordic-steel", name: "Nordic Steel AS", type: "Supplier", jurisdiction: "NO",
+        status: "Approved", risk: "Low", asset: "N-EURC", wallet: "0xns01...7100"
+      },
+      {
+        id: "cp-nordic-review", name: "Baltic Review Logistics", type: "Logistics", jurisdiction: "EE",
+        status: "Review", risk: "Medium", asset: "N-USDC", wallet: "0xbr01...2200"
+      }
+    ],
+    payments: [],
+    reconciliation: [],
+    journalEntries: [],
+    audit: [{
+      id: "aud-nordic-seed-1",
+      at: now,
+      actor: "System",
+      action: "Tenant seeded",
+      object: "Nordic Holdings AB",
+      detail: "Initial tenant 2 operating dataset loaded"
+    }],
+    alerts: []
+  };
+}
+
+function createEmptySeedData() {
+  return {
+    lastUpdated: new Date().toISOString(),
+    currentUser: null,
+    policies: null,
+    entities: [],
+    assets: [],
+    providers: [],
+    wallets: [],
+    counterparties: [],
+    payments: [],
+    reconciliation: [],
+    journalEntries: [],
+    audit: [],
+    alerts: []
   };
 }
 

@@ -2,6 +2,7 @@ import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
 const originalEnv = { ...process.env };
+let importNonce = 0;
 
 function resetEnv() {
   for (const key of Object.keys(process.env)) {
@@ -18,9 +19,46 @@ afterEach(resetEnv);
 
 async function validateProd() {
   // Re-import to get fresh module state after env changes
-  const mod = await import("../../packages/shared/config.mjs?_=" + Date.now());
+  const mod = await import(`../../packages/shared/config.mjs?test=${++importNonce}`);
   return mod.validateProductionConfig;
 }
+
+async function demoResetAllowed() {
+  // isDemoResetAllowed reads process.env at call time, so a fresh import is not
+  // required — but importing here keeps it consistent with validateProd().
+  const mod = await import(`../../packages/shared/config.mjs?test=${++importNonce}`);
+  return mod.isDemoResetAllowed;
+}
+
+test("demo reset is allowed outside production mode (dev/smoke unaffected)", async () => {
+  delete process.env.PRODUCTION_MODE;
+  delete process.env.ALLOW_DEMO_RESET;
+  const isDemoResetAllowed = await demoResetAllowed();
+  assert.equal(isDemoResetAllowed(), true);
+});
+
+test("demo reset is blocked in production mode when ALLOW_DEMO_RESET is unset (H1)", async () => {
+  process.env.PRODUCTION_MODE = "true";
+  delete process.env.ALLOW_DEMO_RESET;
+  const isDemoResetAllowed = await demoResetAllowed();
+  assert.equal(isDemoResetAllowed(), false);
+});
+
+test("demo reset is blocked in production mode when ALLOW_DEMO_RESET is not exactly 'true'", async () => {
+  process.env.PRODUCTION_MODE = "true";
+  const isDemoResetAllowed = await demoResetAllowed();
+  for (const value of ["false", "1", "yes", "TRUE", ""]) {
+    process.env.ALLOW_DEMO_RESET = value;
+    assert.equal(isDemoResetAllowed(), false, `ALLOW_DEMO_RESET=${JSON.stringify(value)} must not enable reset`);
+  }
+});
+
+test("demo reset is allowed in production mode only when ALLOW_DEMO_RESET is exactly 'true'", async () => {
+  process.env.PRODUCTION_MODE = "true";
+  process.env.ALLOW_DEMO_RESET = "true";
+  const isDemoResetAllowed = await demoResetAllowed();
+  assert.equal(isDemoResetAllowed(), true);
+});
 
 test("non-production mode passes with local defaults", async () => {
   delete process.env.PRODUCTION_MODE;

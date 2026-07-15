@@ -69,16 +69,21 @@ SELECT * FROM platform.jobs WHERE status = 'dead_lettered';
 
 **Detection:**
 ```sql
-SELECT count(*) FROM platform.outbox_events WHERE published_at IS NULL;
+-- Still retrying (transient failures, or not yet attempted):
+SELECT count(*) FROM platform.outbox_events WHERE published_at IS NULL AND dead_lettered_at IS NULL;
+-- Dead-lettered (permanently failed after RELAY_MAX_RETRIES attempts, default 5):
+SELECT id, event_type, attempts, last_error, dead_lettered_at
+FROM platform.outbox_events WHERE dead_lettered_at IS NOT NULL;
 ```
 
 **Safe remediation:**
-1. Check relay worker health: `curl http://127.0.0.1:9101/health`
+1. Check relay worker health and dead-letter count: `curl http://127.0.0.1:9101/metrics` (`deadLetterCount`, `unpublishedCount`, `outboxLagMs`)
 2. Check consumer service health (operations, reconciliation)
 3. If relay worker crashed: restart it (`npm run dev` handles this)
-4. Events remain in `published_at IS NULL` state and are retried automatically
+4. Transient failures remain in `published_at IS NULL, dead_lettered_at IS NULL` state and are retried automatically; they no longer starve delivery of other events once dead-lettered (V8 Task 0.2, audit finding H3)
+5. For dead-lettered rows: `last_error` names the root cause (e.g. a consumer 4xx/5xx). Fix the root cause, then manually clear `dead_lettered_at` and reset `attempts = 0` on the affected row(s) to re-queue — there is no automated replay tool yet (0.2.6, deferred)
 
-**Escalation:** If events remain unpublished for > 1 hour, check relay worker logs for systemic failures.
+**Escalation:** If `deadLetterCount` is non-zero, the ops-watchdog raises an "Outbox dead-letter queue non-empty" alert (same pattern as the jobs DLQ alert). If events remain unpublished (not dead-lettered) for > 1 hour, check relay worker logs for systemic failures.
 
 ## Webhook Signature Failure
 

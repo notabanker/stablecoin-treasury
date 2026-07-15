@@ -23,9 +23,10 @@ createJsonService({
       await query(DB, "SELECT 1");
       return ok({ status: "ready" });
     }, { public: true }),
-    route("POST", "/reset", async () => {
-      await reseedWallets();
-      return ok(await listWallets());
+    route("POST", "/reset", async ({ headers }) => {
+      const tenantId = tenantIdFromHeaders(headers);
+      await reseedWallets(tenantId);
+      return ok(await listWallets(tenantId));
     }),
     route("GET", "/entities", async ({ headers }) => ok(await listEntities(tenantIdFromHeaders(headers)))),
     route("GET", "/entities/:id", async ({ params, headers }) => ok(await findEntity(params.id, tenantIdFromHeaders(headers)))),

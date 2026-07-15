@@ -25,9 +25,10 @@ createJsonService({
       await query(DB, "SELECT 1");
       return ok({ status: "ready" });
     }, { public: true }),
-    route("POST", "/reset", async () => {
-      await reseedOperations();
-      return ok(await listProviders());
+    route("POST", "/reset", async ({ headers }) => {
+      const tenantId = tenantIdFromHeaders(headers);
+      await reseedOperations(tenantId);
+      return ok(await listProviders(tenantId));
     }),
     route("GET", "/providers", async ({ headers }) => ok(await listProviders(tenantIdFromHeaders(headers)))),
     route("GET", "/providers/:id", async ({ params, headers }) => ok(await findProvider(params.id, tenantIdFromHeaders(headers)))),
