@@ -5,11 +5,8 @@ import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
 export async function reseedPayments(tenantId = DEFAULT_TENANT_ID) {
   const { payments } = createSeedData(tenantId);
   await withTransaction("payment", async (client) => {
-    await client.query("DELETE FROM payment.idempotency_keys WHERE tenant_id = $1", [tenantId]);
-    await client.query("DELETE FROM payment.payment_events WHERE tenant_id = $1", [tenantId]);
-    // Approval rows reference payments (FK) and must go first or the payments delete fails.
-    await client.query("DELETE FROM payment.payment_approvals WHERE tenant_id = $1", [tenantId]);
-    await client.query("DELETE FROM payment.payments WHERE tenant_id = $1", [tenantId]);
+    // Deletes run under owner privileges via SECURITY DEFINER function (migration 0055)
+    await client.query("SELECT payment.reset_seed($1)", [tenantId]);
 
     for (const payment of payments) {
       await client.query(

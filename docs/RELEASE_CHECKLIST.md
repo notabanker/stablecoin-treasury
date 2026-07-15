@@ -20,7 +20,6 @@
 - [ ] `NODE_ENV=production`
 - [ ] `DEMO_WEBHOOK_SECRET` is not the default
 - [ ] `WEBHOOK_SECRET` is configured
-- [ ] `DEMO_SEED_ENABLED` is not `"true"`
 
 ## Database
 

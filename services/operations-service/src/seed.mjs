@@ -10,9 +10,8 @@ export async function reseedOperations(tenantId = DEFAULT_TENANT_ID) {
     // serialized with any concurrent inserts — no chain gaps from reset races.
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1::text))", [tenantId]);
 
-    await client.query("DELETE FROM operations.providers WHERE tenant_id = $1", [tenantId]);
-    await client.query("DELETE FROM operations.alerts WHERE tenant_id = $1", [tenantId]);
-    await client.query("DELETE FROM operations.audit_events WHERE tenant_id = $1", [tenantId]);
+    // Deletes run under owner privileges via SECURITY DEFINER function (migration 0055)
+    await client.query("SELECT operations.reset_seed($1)", [tenantId]);
 
     for (const provider of providers) {
       await client.query(

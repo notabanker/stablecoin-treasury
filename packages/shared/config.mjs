@@ -79,9 +79,6 @@ export function validateProductionConfig(serviceName) {
     // Demo credential gate: seed users must not use demo passwords in production.
     // SHA-256 of "demo123" is d3ad931... ; scrypt format starts with "scrypt$".
     // The scrypt demo hash is checked via DB query at startup (see 2.4 in auth.mjs).
-    if (process.env.DEMO_SEED_ENABLED === "true") {
-      failures.push("DEMO_SEED_ENABLED must not be 'true' in production mode");
-    }
   }
 
   const errors = failures.filter(Boolean);

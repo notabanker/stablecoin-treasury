@@ -6,25 +6,8 @@ import { getOrCreateSharedAccount, getOrCreateWalletAccount, postTransaction } f
 export async function reseedWallets(tenantId = DEFAULT_TENANT_ID) {
   const { entities, assets, wallets } = createSeedData(tenantId);
   await withTransaction("wallet", async (client) => {
-    // Order matters: wallets FKs to legal_entities and assets; ledger_accounts FKs to wallets;
-    // ledger_entries FKs to ledger_accounts and ledger_transactions.
-    await client.query(
-      `DELETE FROM wallet.ledger_entries le
-       WHERE EXISTS (
-         SELECT 1 FROM wallet.ledger_transactions lt
-         WHERE lt.id = le.transaction_id AND lt.tenant_id = $1
-       )
-       OR EXISTS (
-         SELECT 1 FROM wallet.ledger_accounts la
-         WHERE la.id = le.account_id AND la.tenant_id = $1
-       )`,
-      [tenantId]
-    );
-    await client.query("DELETE FROM wallet.ledger_transactions WHERE tenant_id = $1", [tenantId]);
-    await client.query("DELETE FROM wallet.ledger_accounts WHERE tenant_id = $1", [tenantId]);
-    await client.query("DELETE FROM wallet.wallets WHERE tenant_id = $1", [tenantId]);
-    await client.query("DELETE FROM wallet.assets WHERE tenant_id = $1", [tenantId]);
-    await client.query("DELETE FROM wallet.legal_entities WHERE tenant_id = $1", [tenantId]);
+    // Deletes run under owner privileges via SECURITY DEFINER function (migration 0055)
+    await client.query("SELECT wallet.reset_seed($1)", [tenantId]);
 
     for (const entity of entities) {
       await client.query(
