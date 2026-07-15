@@ -201,10 +201,15 @@ async function login(body, ctx) {
     sessionCookieHeader(session.token, session.expiresAt),
     csrfCookieHeader(session.csrfToken, session.expiresAt)
   ];
+  const productionMode = process.env.PRODUCTION_MODE === 'true';
   return {
     body: {
       user: { id: user.id, email: user.email, displayName: user.displayName, tenantId: user.tenantId, roles: user.roles },
-      session: { token: session.token, csrfToken: session.csrfToken, expiresAt: session.expiresAt },
+      session: {
+        ...(productionMode ? {} : { token: session.token }),
+        csrfToken: session.csrfToken,
+        expiresAt: session.expiresAt,
+      },
       message: "Login successful"
     },
     cookies
