@@ -13,7 +13,7 @@ export function isDemoResetAllowed() {
 
 const SENSITIVE_KEYS = new Set([
   "INTERNAL_SERVICE_TOKEN", "WEBHOOK_SECRET", "DEMO_WEBHOOK_SECRET",
-  "DATABASE_URL", "SESSION_COOKIE_SECRET"
+  "DATABASE_URL", "SESSION_COOKIE_SECRET", "SERVICE_DB_PASSWORD"
 ]);
 
 function check(condition, message) {
@@ -52,6 +52,12 @@ export function validateProductionConfig(serviceName) {
 
   failures.push(check(process.env.NODE_ENV === "production",
     `NODE_ENV must be 'production'. Current: ${process.env.NODE_ENV || "<unset>"}`));
+
+  const svcDbPassword = process.env.SERVICE_DB_PASSWORD;
+  failures.push(check(
+    svcDbPassword && svcDbPassword !== "service-dev-password",
+    `SERVICE_DB_PASSWORD must be set (not the default). Current: ${redacted(svcDbPassword)}`
+  ));
 
   // Gateway/web-specific checks
   if (serviceName === "api-gateway" || serviceName === "gateway") {

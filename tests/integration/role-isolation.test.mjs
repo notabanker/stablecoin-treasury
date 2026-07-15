@@ -94,3 +94,111 @@ test("payment role can SELECT from platform.jobs (needed for repair)", async (t)
   t.after(() => stack.stop());
   await expectAllowed(stack, "svc_payment", "platform", "jobs", "payment→jobs");
 });
+
+// ── H5: Tightened blanket grants ─────────────────────────────────────────────
+
+test("svc_operations cannot UPDATE or DELETE audit_events", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.stop());
+  const pg = await import("pg");
+  const client = new pg.Client({ connectionString: roleUrl(stack, "svc_operations") });
+  try {
+    await client.connect();
+    await client.query("UPDATE operations.audit_events SET detail = 'x' WHERE 1=0");
+    assert.fail("expected permission denied for UPDATE on audit_events");
+  } catch (error) {
+    assert.ok(/permission denied/i.test(error.message), `UPDATE on audit_events: ${error.message}`);
+  } finally {
+    await client.end().catch(() => {});
+  }
+  const client2 = new pg.Client({ connectionString: roleUrl(stack, "svc_operations") });
+  try {
+    await client2.connect();
+    await client2.query("DELETE FROM operations.audit_events WHERE 1=0");
+    assert.fail("expected permission denied for DELETE on audit_events");
+  } catch (error) {
+    assert.ok(/permission denied/i.test(error.message), `DELETE on audit_events: ${error.message}`);
+  } finally {
+    await client2.end().catch(() => {});
+  }
+});
+
+test("svc_payment cannot UPDATE or DELETE payment_events", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.stop());
+  for (const op of ["UPDATE", "DELETE"]) {
+    const pg = await import("pg");
+    const client = new pg.Client({ connectionString: roleUrl(stack, "svc_payment") });
+    try {
+      await client.connect();
+      await client.query(`${op} FROM payment.payment_events WHERE 1=0`);
+      assert.fail(`expected permission denied for ${op} on payment_events`);
+    } catch (error) {
+      assert.ok(/permission denied/i.test(error.message), `${op} on payment_events: ${error.message}`);
+    } finally {
+      await client.end().catch(() => {});
+    }
+  }
+});
+
+test("svc_payment cannot UPDATE or DELETE payment_approvals", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.stop());
+  for (const op of ["UPDATE", "DELETE"]) {
+    const pg = await import("pg");
+    const client = new pg.Client({ connectionString: roleUrl(stack, "svc_payment") });
+    try {
+      await client.connect();
+      await client.query(`${op} FROM payment.payment_approvals WHERE 1=0`);
+      assert.fail(`expected permission denied for ${op} on payment_approvals`);
+    } catch (error) {
+      assert.ok(/permission denied/i.test(error.message), `${op} on payment_approvals: ${error.message}`);
+    } finally {
+      await client.end().catch(() => {});
+    }
+  }
+});
+
+test("svc_job cannot UPDATE or DELETE payment_events or payment_approvals", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.stop());
+  for (const table of ["payment_events", "payment_approvals"]) {
+    for (const op of ["UPDATE", "DELETE"]) {
+      const pg = await import("pg");
+      const client = new pg.Client({ connectionString: roleUrl(stack, "svc_job") });
+      try {
+        await client.connect();
+        await client.query(`${op} FROM payment.${table} WHERE 1=0`);
+        assert.fail(`expected permission denied for ${op} on ${table}`);
+      } catch (error) {
+        assert.ok(/permission denied/i.test(error.message), `${op} on ${table}: ${error.message}`);
+      } finally {
+        await client.end().catch(() => {});
+      }
+    }
+  }
+});
+
+test("svc_wallet cannot DELETE from ledger tables", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.stop());
+  for (const table of ["ledger_accounts", "ledger_transactions", "ledger_entries"]) {
+    const pg = await import("pg");
+    const client = new pg.Client({ connectionString: roleUrl(stack, "svc_wallet") });
+    try {
+      await client.connect();
+      await client.query(`DELETE FROM wallet.${table} WHERE 1=0`);
+      assert.fail(`expected permission denied for DELETE on ${table}`);
+    } catch (error) {
+      assert.ok(/permission denied/i.test(error.message), `DELETE on ${table}: ${error.message}`);
+    } finally {
+      await client.end().catch(() => {});
+    }
+  }
+});
+
+test("svc_job can SELECT from identity.tenants (H3 support)", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.stop());
+  await expectAllowed(stack, "svc_job", "identity", "tenants", "job→tenants");
+});

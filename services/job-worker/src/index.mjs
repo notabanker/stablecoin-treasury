@@ -7,6 +7,16 @@ import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
 import { resolveAdapter, withBreaker } from "../../../packages/shared/adapters/custody.mjs";
 import { validateProductionConfig } from "../../../packages/shared/config.mjs";
 
+// — Active tenant query — so background jobs run for every tenant, not just the default
+async function getActiveTenants() {
+  const { rows } = await query("platform",
+    "SELECT id, name FROM identity.tenants WHERE status = 'active' ORDER BY created_at"
+  );
+  return rows.length > 0
+    ? rows.map((r) => r.id)
+    : [DEFAULT_TENANT_ID];
+}
+
 const WORKER_ID = `worker-${Math.random().toString(36).slice(2, 10)}`;
 const POLL_INTERVAL_MS = Number(process.env.JOB_POLL_INTERVAL_MS || 500);
 const BATCH_LIMIT = 5;
@@ -83,24 +93,33 @@ registerHandler("execute-payment", async (job) => {
   await executePaymentSaga(paymentId, job.id, job.tenant_id || job.payload.tenantId || DEFAULT_TENANT_ID);
 });
 
-// — payment-autoe-expiry handler —
+// — payment-auto-expiry handler (multi-tenant) —
 registerHandler("payment-auto-expiry", async () => {
-  const { rows } = await query(
-    "payment",
-    `UPDATE payment.payments
-     SET status = 'Cancelled'
-     WHERE status = 'Pending approval'
-       AND tenant_id = $1
-       AND created_at < now() - INTERVAL '72 hours'
-     RETURNING id, reference`,
-    [DEFAULT_TENANT_ID]
-  );
-  if (rows.length > 0) {
+  const tenantIds = await getActiveTenants();
+  let totalExpired = 0;
+  const allExpiredIds = [];
+  for (const tenantId of tenantIds) {
+    const { rows } = await query(
+      "payment",
+      `UPDATE payment.payments
+       SET status = 'Cancelled'
+       WHERE status = 'Pending approval'
+         AND tenant_id = $1
+         AND created_at < now() - INTERVAL '72 hours'
+       RETURNING id, reference`,
+      [tenantId]
+    );
+    if (rows.length > 0) {
+      totalExpired += rows.length;
+      allExpiredIds.push(...rows.map((r) => r.id));
+    }
+  }
+  if (totalExpired > 0) {
     console.log(JSON.stringify({
       at: new Date().toISOString(),
       event: "auto_expiry",
-      expired: rows.length,
-      paymentIds: rows.map((r) => r.id)
+      expired: totalExpired,
+      paymentIds: allExpiredIds
     }));
   }
 });
@@ -157,7 +176,10 @@ const WATCHDOG_OUTBOX_LAG_MS = Number(process.env.WATCHDOG_OUTBOX_LAG_MS || 6000
 const WATCHDOG_PENDING_JOB_AGE_MS = Number(process.env.WATCHDOG_PENDING_JOB_AGE_MS || 300000); // 5 minutes
 
 registerHandler("ops-watchdog", async () => {
-  await runWatchdog(DEFAULT_TENANT_ID);
+  const tenantIds = await getActiveTenants();
+  for (const tenantId of tenantIds) {
+    await runWatchdog(tenantId);
+  }
 });
 
 async function runWatchdog(tenantId) {

@@ -113,9 +113,29 @@ test("production mode passes with a safe production config", async () => {
   process.env.SESSION_COOKIE_SECURE = "true";
   process.env.DEMO_WEBHOOK_SECRET = "prod-webhook-secret";
   process.env.WEBHOOK_SECRET = "prod-webhook-secret-xyz";
+  process.env.SERVICE_DB_PASSWORD = "prod-svc-db-password-a1b2c3";
   const validate = await validateProd();
   const result = validate("api-gateway");
   assert.equal(result.ok, true);
+});
+
+test("production mode fails if SERVICE_DB_PASSWORD is missing or default (H4)", async () => {
+  process.env.PRODUCTION_MODE = "true";
+  process.env.AUTH_REQUIRED = "true";
+  process.env.INTERNAL_AUTH_REQUIRED = "true";
+  process.env.INTERNAL_SERVICE_TOKEN = "prod-token";
+  process.env.CORS_ORIGIN = "https://t.example.com";
+  process.env.DATABASE_URL = "postgres://db.internal:5432/treasury_prod";
+  process.env.NODE_ENV = "production";
+  process.env.SESSION_COOKIE_SECURE = "true";
+  process.env.DEMO_WEBHOOK_SECRET = "prod-secret";
+  process.env.WEBHOOK_SECRET = "prod-secret";
+  delete process.env.SERVICE_DB_PASSWORD;
+  const validate = await validateProd();
+  assert.throws(() => validate("api-gateway"), /SERVICE_DB_PASSWORD/);
+  // Also fails with default value
+  process.env.SERVICE_DB_PASSWORD = "service-dev-password";
+  assert.throws(() => validate("api-gateway"), /SERVICE_DB_PASSWORD/);
 });
 
 test("error messages never include raw secret values", async () => {
