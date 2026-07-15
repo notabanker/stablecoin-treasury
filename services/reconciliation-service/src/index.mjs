@@ -176,10 +176,23 @@ async function listReconciliation(tenantId = DEFAULT_TENANT_ID) {
 
 // ── Provider statements (V6 Epic 5.2) ──────────────────────────────────
 
+// V6 Epic 5.2 — ProviderId tenant validation: reject statements for providerIds
+// that belong to a different tenant (audit finding M8).
+// The provider is resolved by id only, but we verify its tenant matches the request's
+// tenant context by checking it exists in operations.providers under that tenant.
 async function ingestStatement(body, tenantId) {
   const { providerId, externalId, periodStart, periodEnd, lines } = body || {};
   if (!providerId || !externalId) {
     throw httpError(422, "providerId and externalId are required", "missing_statement_identity");
+  }
+  // Verify the provider belongs to the calling tenant
+  const { rows: providerRows } = await query(
+    "operations",
+    "SELECT id FROM operations.providers WHERE id = $1 AND tenant_id = $2 LIMIT 1",
+    [providerId, tenantId]
+  );
+  if (!providerRows[0]) {
+    throw httpError(403, "Provider not found or not accessible for this tenant", "provider_tenant_mismatch");
   }
   if (!Array.isArray(lines) || lines.length === 0) {
     throw httpError(422, "Statement must contain at least one line", "missing_lines");

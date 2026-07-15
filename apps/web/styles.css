@@ -938,3 +938,34 @@ label span {
     right: 18px;
   }
 }
+
+/* ── Approval list (M5) ── */
+.approval-list {
+  margin: 8px 0;
+  padding: 8px 12px;
+  background: var(--panel-soft);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.approval-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+}
+.approval-actor {
+  font-weight: 600;
+  color: var(--teal);
+}
+.approval-count {
+  font-weight: 600;
+  color: var(--ink);
+}
+.approval-action {
+  color: var(--muted);
+  font-size: 12px;
+}
+.approval-status-badge {
+  color: var(--status-clear);
+  font-weight: 600;
+}

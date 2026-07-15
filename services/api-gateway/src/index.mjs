@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ratesToEur } from "../../../packages/shared/data.mjs";
@@ -59,9 +58,13 @@ createJsonService({
       return ok({ state: await composeStateSafe(ctx) });
       })),
     route("POST", "/api/payments", paymentPerm("create")(async (ctx) => {
+      const idempotencyKey = ctx.headers["idempotency-key"];
+      if (!idempotencyKey) {
+        throw httpError(400, "Idempotency-Key required", "idempotency_key_required");
+      }
       const result = await servicePost("payment", "/payments", ctx.body, {
         ...paymentMutationOptions(ctx),
-        idempotencyKey: ctx.headers["idempotency-key"] || randomUUID()
+        idempotencyKey
       });
       return ok({ ...result, state: await composeStateSafe(ctx) });
     })),

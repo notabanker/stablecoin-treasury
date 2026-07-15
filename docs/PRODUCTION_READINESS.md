@@ -1,6 +1,6 @@
 # Production Readiness
 
-Last updated: 2026-07-04 (V5.1). This document is the single source of truth for
+Last updated: 2026-07-15 (V8). This document is the single source of truth for
 what is delivered and what is still required before real money movement. Every
 "delivered" claim carries a test or probe reference; nothing is listed as missing
 that already exists.
@@ -9,11 +9,11 @@ that already exists.
 
 | Suite | Command | Count | Scope |
 |---|---|---|---|
-| Unit | `npm run test` | 49 | Pure logic, no DB access at import time |
-| Integration | `npm run test:integration` | 42 | Full stack against ephemeral throwaway databases, sequential execution |
+| Unit | `npm run test` | 55 | Pure logic, no DB access at import time |
+| Integration | `npm run test:integration` | 92 | Full stack against ephemeral throwaway databases, sequential execution |
 | Concurrency | `npm run test:concurrency` | 4 | N-way parallel requests against a live stack |
 | Smoke | `npm run smoke` | — | Happy path + 4 failure paths against local loopback |
-| **Total** | `npm run test:all` | **95** | |
+| **Total** | `npm run test:all` | **151** | |
 
 ---
 
@@ -332,10 +332,10 @@ Epic 7 (Task 7.2) but are explicitly **not implementable by code agents**.
 npm run db:setup          # one-time: create treasury_dev/treasury_test, apply migrations
 npm run check             # syntax check every .mjs file + apps/web/main.js + migration check
 npm run dev               # start all 10 services against DATABASE_URL (defaults to treasury_dev)
-npm run test              # unit tests (49 tests, pure logic, no DB required)
-npm run test:integration  # integration tests (42 tests, full stack against ephemeral DBs)
+npm run test              # unit tests (55 tests, pure logic, no DB required)
+npm run test:integration  # integration tests (92 tests, full stack against ephemeral DBs)
 npm run test:concurrency  # concurrency tests (4 tests, N-way parallel against live stack)
-npm run test:all          # all 95 tests
+npm run test:all          # all 151 tests
 npm run smoke             # end-to-end smoke against running gateway (loopback:8080)
 npm run migrate           # apply pending migrations
 docker compose up --build

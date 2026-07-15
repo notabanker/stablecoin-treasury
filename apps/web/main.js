@@ -670,6 +670,24 @@ function renderPaymentTable(payments, selectable) {
   `;
 }
 
+function renderApprovalsList(payment) {
+  // Show approval information: creator and any distinct approvers.
+  // The full approval list is available via GET /api/payments/:id/approvals.
+  // For the detail view, show what we know from the payment state.
+  const parts = [];
+  if (payment.createdBy) {
+    parts.push(`<div class=\"approval-row\"><span class=\"approval-actor\">${escapeHtml(payment.createdBy)}</span> <span class=\"approval-action\">created</span></div>`);
+  }
+  if (payment.approvals > 0) {
+    parts.push(`<div class=\"approval-row\"><span class=\"approval-count\">${payment.approvals}/${payment.requiredApprovals}</span> <span class=\"approval-action\">approvals completed</span></div>`);
+    if (payment.approvals >= payment.requiredApprovals && payment.status === "Approved") {
+      parts.push(`<div class=\"approval-row\"><span class=\"approval-status-badge\">✓ Fully approved</span></div>`);
+    }
+  }
+  if (parts.length === 0) return "";
+  return `<div class=\"approval-list\">${parts.join("")}</div>`;
+}
+
 function renderPaymentActions(payment, compact) {
   const parts = [];
   if (payment.status === "Pending approval") {
@@ -705,11 +723,14 @@ function renderPaymentDetail(payment) {
       ${detail("Asset", payment.asset)}
       ${detail("Amount", token(payment.amount, payment.asset))}
       ${detail("Fee", token(payment.fee, payment.asset))}
+      ${detail("Created by", payment.createdBy || "-")}
       ${detail("Approvals", `${payment.approvals}/${payment.requiredApprovals}`)}
+      ${payment.createdBy ? detail("Creator", payment.createdBy) : ""}
       ${detail("Provider ref", payment.providerRef || "-")}
       ${detail("Chain ref", payment.chainRef || "-")}
     </div>
     <div class="detail-memo">${escapeHtml(payment.memo || "No memo")}</div>
+    ${renderApprovalsList(payment)}
     <div class="action-strip">
       ${renderPaymentActions(payment, false) || `<span class="muted">No open payment action</span>`}
     </div>
