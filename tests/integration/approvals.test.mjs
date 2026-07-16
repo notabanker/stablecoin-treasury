@@ -80,7 +80,7 @@ test("two distinct approvers transition payment to Approved", async (t) => {
   // Create payment as marta (amount requires 2 approvals)
   const create = await api(stack.baseUrl, "/payments", {
     method: "POST",
-    headers: martaHeaders(martaCsrf),
+    headers: { ...martaHeaders(martaCsrf), "Idempotency-Key": "approvals-two-distinct-1" },
     body: JSON.stringify({ amount: 300000, counterpartyId: "cp-nordic", sourceWalletId: "wal-de-eur", type: "Supplier" })
   });
   assert.equal(create.status, 200);
@@ -143,7 +143,7 @@ test("creator self-approval above threshold returns 403", async (t) => {
   // Create payment that needs ≥1 approval (above threshold)
   const create = await api(stack.baseUrl, "/payments", {
     method: "POST",
-    headers,
+    headers: { ...headers, "Idempotency-Key": "approvals-self-approve-1" },
     body: JSON.stringify({ amount: 100000, counterpartyId: "cp-nordic", sourceWalletId: "wal-de-eur", type: "Supplier" })
   });
   assert.equal(create.status, 200);
@@ -209,7 +209,7 @@ test("N-1 distinct approvers leaves payment in PendingApproval", async (t) => {
   // Marta creates a 2-approval payment
   const create = await api(stack.baseUrl, "/payments", {
     method: "POST",
-    headers: martaHeaders,
+    headers: { ...martaHeaders, "Idempotency-Key": "approvals-n-minus-one-1" },
     body: JSON.stringify({ amount: 300000, counterpartyId: "cp-nordic", sourceWalletId: "wal-de-eur", type: "Supplier" })
   });
   assert.equal(create.status, 200);

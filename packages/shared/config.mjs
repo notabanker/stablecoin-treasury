@@ -45,8 +45,12 @@ export function validateProductionConfig(serviceName) {
     `CORS_ORIGIN must be explicit and not "*". Current: ${cors || "<unset>"}`));
 
   const dbUrl = process.env.DATABASE_URL || "";
+  const dbName = dbUrl.split("/").pop()?.split("?")[0] || "";
+  const testHarness = process.env.TEST_HARNESS_PRODUCTION_MODE === "true";
+  const ephemeralTestDb = dbName.startsWith("treasury_test_");
   failures.push(check(
-    !dbUrl.includes("127.0.0.1") && !dbUrl.includes("localhost") && !dbUrl.includes("treasury_dev"),
+    (testHarness && ephemeralTestDb)
+      || (!dbUrl.includes("127.0.0.1") && !dbUrl.includes("localhost") && !dbUrl.includes("treasury_dev")),
     `DATABASE_URL must not point to localhost or treasury_dev. Current: ${redacted(dbUrl)}`
   ));
 
@@ -76,9 +80,6 @@ export function validateProductionConfig(serviceName) {
       `WEBHOOK_SECRET must be set (not default). Current: ${redacted(webhookSecret)}`
     ));
 
-    // Demo credential gate: seed users must not use demo passwords in production.
-    // SHA-256 of "demo123" is d3ad931... ; scrypt format starts with "scrypt$".
-    // The scrypt demo hash is checked via DB query at startup (see 2.4 in auth.mjs).
   }
 
   const errors = failures.filter(Boolean);

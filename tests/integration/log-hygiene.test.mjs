@@ -68,7 +68,8 @@ describe("log hygiene", () => {
       method: "POST",
       headers: {
         Cookie: `session=${sessionCookie}; csrf=${csrfToken}`,
-        "X-Csrf-Token": csrfToken
+        "X-Csrf-Token": csrfToken,
+        "Idempotency-Key": "log-hygiene-create-1"
       },
       body: JSON.stringify({
         amount: 1,

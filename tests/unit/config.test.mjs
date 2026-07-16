@@ -82,6 +82,24 @@ test("production mode fails if INTERNAL_SERVICE_TOKEN is missing or default", as
   assert.throws(() => validate("api-gateway"), /INTERNAL_SERVICE_TOKEN/);
 });
 
+test("production mode allows ephemeral treasury_test_ DB when TEST_HARNESS_PRODUCTION_MODE is set", async () => {
+  process.env.PRODUCTION_MODE = "true";
+  process.env.TEST_HARNESS_PRODUCTION_MODE = "true";
+  process.env.AUTH_REQUIRED = "true";
+  process.env.INTERNAL_AUTH_REQUIRED = "true";
+  process.env.INTERNAL_SERVICE_TOKEN = "prod-internal-token-a1b2c3d4e5f6";
+  process.env.CORS_ORIGIN = "https://treasury.example.com";
+  process.env.DATABASE_URL = "postgres://127.0.0.1:5432/treasury_test_abc123";
+  process.env.NODE_ENV = "production";
+  process.env.SESSION_COOKIE_SECURE = "true";
+  process.env.DEMO_WEBHOOK_SECRET = "prod-webhook-secret";
+  process.env.WEBHOOK_SECRET = "prod-webhook-secret-xyz";
+  process.env.SERVICE_DB_PASSWORD = "prod-svc-db-password-a1b2c3";
+  const validate = await validateProd();
+  const result = validate("api-gateway");
+  assert.equal(result.ok, true);
+});
+
 test("production mode fails if DATABASE_URL points to localhost", async () => {
   process.env.PRODUCTION_MODE = "true";
   process.env.AUTH_REQUIRED = "true";

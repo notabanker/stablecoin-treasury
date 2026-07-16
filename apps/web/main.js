@@ -13,6 +13,7 @@ const state = {
   refreshFailedAt: null,
   needsLogin: false,
   selectedPaymentId: "",
+  paymentApprovals: {},
   sessionToken: "",
   showPaymentForm: false,
   toast: null
@@ -100,6 +101,7 @@ function bindEvents() {
     if (action === "select-payment") {
       state.selectedPaymentId = id;
       state.activeView = "payments";
+      await loadPaymentApprovals(id);
       render();
       return;
     }
@@ -124,6 +126,10 @@ function bindEvents() {
 
     if (mutations[action]) {
       await mutations[action]();
+      if (action === "approve-payment" && state.selectedPaymentId) {
+        await loadPaymentApprovals(state.selectedPaymentId);
+        render();
+      }
     }
   });
 
@@ -321,6 +327,19 @@ function receiveState(data) {
   state.needsLogin = false;
   state.refreshFailedAt = null;
   state.selectedPaymentId = state.selectedPaymentId || data.selectedPaymentId || data.payments?.[0]?.id || "";
+  if (state.selectedPaymentId) {
+    void loadPaymentApprovals(state.selectedPaymentId).then(() => render());
+  }
+}
+
+async function loadPaymentApprovals(paymentId) {
+  if (!paymentId) return;
+  try {
+    const rows = await request(`/payments/${paymentId}/approvals`);
+    state.paymentApprovals[paymentId] = Array.isArray(rows) ? rows : [];
+  } catch {
+    state.paymentApprovals[paymentId] = [];
+  }
 }
 
 function render() {
@@ -671,12 +690,15 @@ function renderPaymentTable(payments, selectable) {
 }
 
 function renderApprovalsList(payment) {
-  // Show approval information: creator and any distinct approvers.
-  // The full approval list is available via GET /api/payments/:id/approvals.
-  // For the detail view, show what we know from the payment state.
   const parts = [];
-  if (payment.createdBy) {
-    parts.push(`<div class=\"approval-row\"><span class=\"approval-actor\">${escapeHtml(payment.createdBy)}</span> <span class=\"approval-action\">created</span></div>`);
+  const creatorLabel = payment.createdByDisplay || payment.createdBy;
+  if (creatorLabel) {
+    parts.push(`<div class=\"approval-row\"><span class=\"approval-actor\">${escapeHtml(creatorLabel)}</span> <span class=\"approval-action\">created</span></div>`);
+  }
+  const approvals = state.paymentApprovals[payment.id] || [];
+  for (const row of approvals) {
+    const when = row.approvedAt ? formatDate(row.approvedAt) : "";
+    parts.push(`<div class=\"approval-row\"><span class=\"approval-actor\">${escapeHtml(row.display || row.approverId || "Approver")}</span> <span class=\"approval-action\">approved</span>${when ? `<span class=\"muted-cell\">${escapeHtml(when)}</span>` : ""}</div>`);
   }
   if (payment.approvals > 0) {
     parts.push(`<div class=\"approval-row\"><span class=\"approval-count\">${payment.approvals}/${payment.requiredApprovals}</span> <span class=\"approval-action\">approvals completed</span></div>`);
@@ -690,8 +712,21 @@ function renderApprovalsList(payment) {
 
 function renderPaymentActions(payment, compact) {
   const parts = [];
+  const currentUserId = state.data?.currentUser?.id;
+  const creatorBlocked = Boolean(
+    payment.createdBy
+    && currentUserId
+    && currentUserId !== "anon"
+    && payment.createdBy === currentUserId
+  );
   if (payment.status === "Pending approval") {
-    parts.push(button(compact ? "Approve" : "Approve payment", "approve-payment", payment.id, "secondary"));
+    parts.push(button(
+      compact ? "Approve" : "Approve payment",
+      "approve-payment",
+      payment.id,
+      "secondary",
+      { disabled: creatorBlocked, title: creatorBlocked ? "Creators cannot approve their own payment" : "" }
+    ));
     parts.push(button(compact ? "Cancel" : "Cancel payment", "cancel-payment", payment.id, "ghost"));
   }
   if (payment.status === "Approved") {
@@ -1327,10 +1362,11 @@ function rule(label, value, tone) {
   `;
 }
 
-function button(label, action, id = "", variant = "secondary") {
-  const busy = state.busy ? "disabled" : "";
+function button(label, action, id = "", variant = "secondary", options = {}) {
+  const disabled = state.busy || options.disabled ? "disabled" : "";
+  const title = options.title ? ` title="${escapeHtml(options.title)}"` : "";
   const idAttr = id ? ` data-id="${escapeHtml(id)}"` : "";
-  return `<button class="btn ${escapeHtml(variant)}" type="button" data-action="${escapeHtml(action)}"${idAttr} ${busy}>${escapeHtml(label)}</button>`;
+  return `<button class="btn ${escapeHtml(variant)}" type="button" data-action="${escapeHtml(action)}"${idAttr}${title} ${disabled}>${escapeHtml(label)}</button>`;
 }
 
 function option(value, selected) {

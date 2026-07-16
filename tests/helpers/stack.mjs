@@ -109,8 +109,25 @@ export async function startStack({ verbose = false, extraEnv = {}, logCaptureMax
     return `postgres://${role}:${serviceDbPassword}@${dbHost}:${dbPort}${adminUrlObj.pathname}`;
   }
 
+  const productionHarnessEnv = extraEnv.PRODUCTION_MODE === "true"
+    ? {
+        TEST_HARNESS_PRODUCTION_MODE: "true",
+        NODE_ENV: "production",
+        AUTH_REQUIRED: "true",
+        INTERNAL_AUTH_REQUIRED: "true",
+        INTERNAL_SERVICE_TOKEN: extraEnv.INTERNAL_SERVICE_TOKEN || "test-prod-internal-token-abc123",
+        CORS_ORIGIN: extraEnv.CORS_ORIGIN || "http://127.0.0.1:8080",
+        SESSION_COOKIE_SECURE: "true",
+        SESSION_COOKIE_SECRET: extraEnv.SESSION_COOKIE_SECRET || "test-prod-session-secret-32chars-minimum",
+        WEBHOOK_SECRET: extraEnv.WEBHOOK_SECRET || "test-prod-webhook-secret",
+        DEMO_WEBHOOK_SECRET: extraEnv.DEMO_WEBHOOK_SECRET || "test-prod-demo-webhook-secret",
+        SERVICE_DB_PASSWORD: extraEnv.SERVICE_DB_PASSWORD || "test-prod-svc-db-password"
+      }
+    : {};
+
   const sharedEnv = {
     ...process.env,
+    ...productionHarnessEnv,
     ...extraEnv,
     DATABASE_URL: database.url,
     HOST: "127.0.0.1",

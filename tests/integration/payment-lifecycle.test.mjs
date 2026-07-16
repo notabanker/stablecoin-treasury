@@ -131,6 +131,7 @@ test("blocked counterparty payments never reach execution", async (t) => {
 
   const create = await api(stack.baseUrl, "/payments", {
     method: "POST",
+    headers: { "Idempotency-Key": "lifecycle-blocked-cp-1" },
     body: JSON.stringify({ amount: 1000, counterpartyId: "cp-baltic", sourceWalletId: "wal-de-eur", type: "Supplier" })
   });
   assert.equal(create.data.payment.status, "Blocked");
@@ -145,6 +146,7 @@ test("a counterparty under review blocks approval with 409 review_required", asy
 
   const create = await api(stack.baseUrl, "/payments", {
     method: "POST",
+    headers: { "Idempotency-Key": "lifecycle-review-required-1" },
     body: JSON.stringify({ amount: 5000, counterpartyId: "cp-orion", sourceWalletId: "wal-nl-usd", type: "Supplier" })
   });
   assert.equal(create.data.payment.status, "Pending approval");
@@ -160,6 +162,7 @@ test("payments over the hard transfer limit are blocked even with sufficient bal
 
   const create = await api(stack.baseUrl, "/payments", {
     method: "POST",
+    headers: { "Idempotency-Key": "lifecycle-hard-limit-1" },
     body: JSON.stringify({ amount: 800000, counterpartyId: "cp-nordic", sourceWalletId: "wal-hold-eur", type: "Supplier" })
   });
   assert.equal(create.data.payment.status, "Blocked");

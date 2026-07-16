@@ -146,6 +146,6 @@ GRANT SELECT ON operations.providers TO svc_reconciliation;
 -- the 0025 pattern but without actual scrypt. Replace it with a proper salted
 -- scrypt hash matching the 0025 pattern used for all other seed users.
 UPDATE identity.users
-SET password_hash = 'scrypt$16384$8$1$389vZ9VFBjIDdV5D-1iHkg$bFbPlGEQJ2JtbVY7tnTIvVS8AAIYbPy6oQKqJ9j4cBrbA3QYD59aY5ywuK6F2z58JDgEYWwA8qFHfh_mc_bOpQ'
+SET password_hash = 'scrypt$16384$8$1$zNm7P6Yk6prNuOfwYHTfmw$rQgLozr5CeiVLp7tuqe4DzMF7daU5zD83NtKI0Fp66jCjd3XvYdr8v6DJ__3hnWwDB53-5zMd677VPwjbUPLUw'
 WHERE id = 'b0000000-0000-0000-0000-000000000002'
   AND tenant_id = '00000000-0000-0000-0000-000000000002';

@@ -1,4 +1,5 @@
 import { DEFAULT_TENANT_ID } from "./tenant.mjs";
+import { roundMoney } from "./money.mjs";
 
 const NORDIC_DEMO_TENANT_ID = "00000000-0000-0000-0000-000000000002";
 
@@ -545,9 +546,7 @@ export function nextPaymentReference(payments) {
   return `PMT-${max + 1}`;
 }
 
-export function roundMoney(value) {
-  return Math.round(Number(value) * 100) / 100;
-}
+export { roundMoney };
 
 export function randomHex(length) {
   return Math.random().toString(16).slice(2, 2 + length).padEnd(length, "0").toUpperCase();

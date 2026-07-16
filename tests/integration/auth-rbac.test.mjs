@@ -86,6 +86,24 @@ test("AUTH_REQUIRED gates mutating routes and enforces payment:create permission
   assert.equal(approverReset.data.error, "forbidden");
 });
 
+test("tenant 2 second user Maria can log in with demo123 (M6 four-eyes demo)", async (t) => {
+  const previousAuthRequired = process.env.AUTH_REQUIRED;
+  process.env.AUTH_REQUIRED = "true";
+  const stack = await startStack();
+  t.after(async () => {
+    if (previousAuthRequired === undefined) {
+      delete process.env.AUTH_REQUIRED;
+    } else {
+      process.env.AUTH_REQUIRED = previousAuthRequired;
+    }
+    await stack.stop();
+  });
+
+  const mariaLogin = await login(stack.baseUrl, "maria@nordic.corp");
+  assert.equal(mariaLogin.status, 200, "Maria's scrypt password hash must verify demo123");
+  assert.equal(mariaLogin.data.user?.email, "maria@nordic.corp");
+});
+
 test("authenticated tenant context isolates state and supports tenant 2 payment lifecycle", async (t) => {
   const previousAuthRequired = process.env.AUTH_REQUIRED;
   process.env.AUTH_REQUIRED = "true";

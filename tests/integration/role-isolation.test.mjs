@@ -131,7 +131,11 @@ test("svc_payment cannot UPDATE or DELETE payment_events", async (t) => {
     const client = new pg.Client({ connectionString: roleUrl(stack, "svc_payment") });
     try {
       await client.connect();
-      await client.query(`${op} FROM payment.payment_events WHERE 1=0`);
+      await client.query(
+        op === "UPDATE"
+          ? "UPDATE payment.payment_events SET actor = 'x' WHERE 1=0"
+          : "DELETE FROM payment.payment_events WHERE 1=0"
+      );
       assert.fail(`expected permission denied for ${op} on payment_events`);
     } catch (error) {
       assert.ok(/permission denied/i.test(error.message), `${op} on payment_events: ${error.message}`);
@@ -149,7 +153,11 @@ test("svc_payment cannot UPDATE or DELETE payment_approvals", async (t) => {
     const client = new pg.Client({ connectionString: roleUrl(stack, "svc_payment") });
     try {
       await client.connect();
-      await client.query(`${op} FROM payment.payment_approvals WHERE 1=0`);
+      await client.query(
+        op === "UPDATE"
+          ? "UPDATE payment.payment_approvals SET approver_display = 'x' WHERE 1=0"
+          : "DELETE FROM payment.payment_approvals WHERE 1=0"
+      );
       assert.fail(`expected permission denied for ${op} on payment_approvals`);
     } catch (error) {
       assert.ok(/permission denied/i.test(error.message), `${op} on payment_approvals: ${error.message}`);
@@ -168,7 +176,11 @@ test("svc_job cannot UPDATE or DELETE payment_events or payment_approvals", asyn
       const client = new pg.Client({ connectionString: roleUrl(stack, "svc_job") });
       try {
         await client.connect();
-        await client.query(`${op} FROM payment.${table} WHERE 1=0`);
+        await client.query(
+          op === "UPDATE"
+            ? `UPDATE payment.${table} SET ${table === "payment_events" ? "actor" : "approver_display"} = 'x' WHERE 1=0`
+            : `DELETE FROM payment.${table} WHERE 1=0`
+        );
         assert.fail(`expected permission denied for ${op} on ${table}`);
       } catch (error) {
         assert.ok(/permission denied/i.test(error.message), `${op} on ${table}: ${error.message}`);
