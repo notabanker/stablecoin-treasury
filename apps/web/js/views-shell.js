@@ -1,8 +1,8 @@
 import { state, views, appEl } from "./state.js";
 import {
-  badge, button, detail, emptyState, findById, formatDate, formatDateTime,
-  metricCard, money, option, pill, rule, shortTenant, token, walletValueEur,
-  computeMetrics, filteredPayments, escapeHtml
+  badge, button, findById, formatDate, formatDateTime,
+  metricCard, money, pill, rule, shortTenant, token, walletValueEur,
+  escapeHtml
 } from "./util.js";
 import { renderToast } from "./api.js";
 import { renderOverviewView, renderPaymentsView } from "./views-payments.js";

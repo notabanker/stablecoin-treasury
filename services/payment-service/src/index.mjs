@@ -504,21 +504,6 @@ function toColumn(field) {
   return field.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
 }
 
-async function findOpenExecutionJobInTx(client, paymentId, tenantId = DEFAULT_TENANT_ID) {
-  const { rows } = await client.query(
-    `SELECT *
-       FROM platform.jobs
-      WHERE tenant_id = $1
-        AND type = 'execute-payment'
-        AND payload->>'paymentId' = $2
-        AND status IN ('pending', 'running', 'failed')
-      ORDER BY created_at DESC
-      LIMIT 1`,
-    [tenantId, paymentId]
-  );
-  return rows[0] || null;
-}
-
 async function insertPaymentInTx(client, payment, tenantId = DEFAULT_TENANT_ID, createdBy = null) {
   payment.reference = await allocateReference(client);
   await client.query(

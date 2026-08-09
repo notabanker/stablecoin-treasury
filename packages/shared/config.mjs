@@ -11,11 +11,6 @@ export function isDemoResetAllowed() {
   return process.env.ALLOW_DEMO_RESET === "true";
 }
 
-const SENSITIVE_KEYS = new Set([
-  "INTERNAL_SERVICE_TOKEN", "WEBHOOK_SECRET", "DEMO_WEBHOOK_SECRET",
-  "DATABASE_URL", "SESSION_COOKIE_SECRET", "SERVICE_DB_PASSWORD"
-]);
-
 function check(condition, message) {
   return condition ? null : message;
 }

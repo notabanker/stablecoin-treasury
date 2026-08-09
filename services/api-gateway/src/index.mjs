@@ -271,7 +271,6 @@ async function composeState(ctx) {
   ]);
 
   return {
-    activeView: "dashboard",
     alerts,
     assets,
     audit,
@@ -342,7 +341,6 @@ async function composeStateSafe(ctx) {
 
   return {
     ...state,
-    activeView: "dashboard",
     currentUser: ctx?.user ? {
       id: ctx.user.userId,
       name: ctx.user.displayName,

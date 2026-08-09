@@ -1,10 +1,9 @@
-import { state, views, appEl } from "./state.js";
+import { state } from "./state.js";
 import {
   badge, button, detail, emptyState, findById, formatDate, formatDateTime,
-  metricCard, money, option, pill, rule, shortTenant, token, walletValueEur,
-  computeMetrics, filteredPayments, escapeHtml, createIdempotencyKey
+  metricCard, money, option, pill, rule, token, walletValueEur,
+  computeMetrics, filteredPayments, escapeHtml
 } from "./util.js";
-import { post, loadPaymentApprovals, renderToast } from "./api.js";
 
 function renderOverviewView() {
   const data = state.data;
