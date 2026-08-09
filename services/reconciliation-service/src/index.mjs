@@ -116,7 +116,13 @@ createJsonService({
       return ok(withComputedAge(inserted));
     }),
     // ── Provider statement ingestion + matching (V6 Epic 5.2) ──
-    route("GET", "/statements", async ({ headers }) => ok(await listStatements(tenantIdFromHeaders(headers)))),
+    // Optional X-Provider-Ref / X-Provider-Id filters: the settlement-webhook job asks
+    // "which statements reference this transfer" before re-running their matcher.
+    route("GET", "/statements", async ({ headers }) => ok(await listStatements(
+      tenantIdFromHeaders(headers),
+      headers["x-provider-ref"] || null,
+      headers["x-provider-id"] || null
+    ))),
     route("POST", "/statements", async ({ body, headers }) => {
       const tenantId = tenantIdFromHeaders(headers);
       return ok(await ingestStatement(body, tenantId));
@@ -236,7 +242,7 @@ async function ingestStatement(body, tenantId) {
   return { status: "ingested", statementId: statement.id, lines: lines.length };
 }
 
-async function listStatements(tenantId = DEFAULT_TENANT_ID) {
+async function listStatements(tenantId = DEFAULT_TENANT_ID, providerRef = null, providerId = null) {
   const { rows } = await query(
     DB,
     `SELECT s.*, COUNT(l.id)::int AS line_count,
@@ -245,9 +251,13 @@ async function listStatements(tenantId = DEFAULT_TENANT_ID) {
        FROM reconciliation.provider_statements s
        LEFT JOIN reconciliation.statement_lines l ON l.statement_id = s.id
       WHERE s.tenant_id = $1
+        AND ($2::text IS NULL OR EXISTS (
+              SELECT 1 FROM reconciliation.statement_lines l2
+               WHERE l2.statement_id = s.id AND l2.tenant_id = s.tenant_id AND l2.provider_ref = $2))
+        AND ($3::text IS NULL OR s.provider_id = $3)
       GROUP BY s.id
       ORDER BY s.received_at DESC`,
-    [tenantId]
+    [tenantId, providerRef, providerId]
   );
   return rows.map((row) => ({
     id: row.id,
@@ -275,9 +285,12 @@ async function matchStatement(statementId, tenantId) {
   }
   const statement = stmtRows[0];
 
+  // pending AND exception: the settlement webhook re-runs this matcher for statements
+  // that reference a settled transfer (audit finding #4) — a line that was unmatched
+  // (exception) when its ingest job ran can now resolve once the payment carries the ref.
   const { rows: lines } = await query(
     DB,
-    "SELECT * FROM reconciliation.statement_lines WHERE statement_id = $1 AND tenant_id = $2 AND match_status = 'pending' ORDER BY provider_ref",
+    "SELECT * FROM reconciliation.statement_lines WHERE statement_id = $1 AND tenant_id = $2 AND match_status IN ('pending', 'exception') ORDER BY provider_ref",
     [statementId, tenantId]
   );
   const payments = await serviceGet("payment", "/payments", { tenantId });
@@ -292,6 +305,13 @@ async function matchStatement(statementId, tenantId) {
   );
 
   const openException = async (client, paymentId, issue, amount, asset, category) => {
+    // Re-matching a statement (settlement webhook) re-examines exception lines; keep one
+    // Open row per (payment, issue) instead of stacking duplicates on every re-run.
+    const { rows: existing } = await client.query(
+      "SELECT id FROM reconciliation.reconciliation_rows WHERE tenant_id = $1 AND payment_id = $2 AND issue = $3 AND status = 'Open' LIMIT 1",
+      [tenantId, paymentId, issue]
+    );
+    if (existing[0]) return;
     await insertRow({
       id: createId("rec"),
       paymentId,

@@ -177,7 +177,30 @@ registerHandler("process-settlement-webhook", async (job) => {
     "UPDATE platform.webhook_events SET status = 'processed', processed_at = now() WHERE provider_id = $1 AND external_id = $2 AND tenant_id = $3",
     [providerId, eventId, tenantId]
   );
-  // Future: trigger reconciliation match or saga settlement confirmation
+  // Audit finding #4: a settlement webhook is the provider's confirmation that the
+  // transfer settled — re-run the matcher for every statement that references it, so a
+  // line that was unmatched when its statement job ran (the payment carried no provider
+  // ref yet) can now resolve. Orchestrated over HTTP like the match-statement job: the
+  // worker has no direct grants on the reconciliation tables (migration 0049), and the
+  // filters ride headers because internal-auth signatures cover the pathname only.
+  if (paymentRef) {
+    const statements = await serviceGet("reconciliation", "/statements", {
+      tenantId,
+      headers: { "X-Provider-Ref": paymentRef, "X-Provider-Id": providerId }
+    });
+    for (const statement of statements) {
+      await servicePost("reconciliation", `/statements/${statement.id}/match`, {}, { tenantId });
+    }
+    if (statements.length > 0) {
+      console.log(JSON.stringify({
+        at: new Date().toISOString(),
+        event: "reconciliation_match_triggered",
+        providerId,
+        paymentRef,
+        statements: statements.length
+      }));
+    }
+  }
 });
 
 // — match-statement handler (V6 Epic 5.2) —
