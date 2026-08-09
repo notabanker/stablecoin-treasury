@@ -149,7 +149,9 @@ Response:
    to the database. Rotate DB credentials, review `pg_stat_activity`/connection logs, and
    escalate. Do NOT "fix" the chain by recomputing hashes — that destroys the evidence.
 5. Expected false positive: none. Demo resets rebuild the tenant-1 chain atomically and
-   verify clean; a break is never routine.
+   verify clean; a break is never routine. The `*.reset_seed` functions are
+   tenant-context-guarded since migration 0057 — calls outside the session's
+   `app.tenant_id` context raise `reset_seed tenant mismatch`.
 
 The alert closes automatically on the next verify cycle only if the chain verifies clean
 again (e.g. after a restore); it never closes while the break persists.
