@@ -4,6 +4,8 @@ import {
   metricCard, money, option, pill, rule, token, walletValueEur,
   computeMetrics, filteredPayments, escapeHtml
 } from "./util.js";
+import { renderCounterpartyTable, renderWalletTable } from "./views-wallets.js";
+import { renderRiskLane } from "./views-ops.js";
 
 function renderOverviewView() {
   const data = state.data;
