@@ -125,47 +125,9 @@ RUNBOOKS.md's canonical 5-query block includes) zero → `verify-audit-chain.mjs
 
 ## Exact next task
 
-Task **0.1.4 — adversarial production reset test — BLOCKED, needs Flo's decision**.
+Task **0.1.4 — adversarial production reset test — CLOSED 2026-08-09**: test exists at `tests/integration/prod-reset.test.mjs:35-48`, verified 3/3 pass (403 `demo_reset_disabled` under `PRODUCTION_MODE=true` without `ALLOW_DEMO_RESET`); production-mode boot escape (`TEST_HARNESS_PRODUCTION_MODE`, packages/shared/config.mjs:44-50 + tests/helpers/stack.mjs:112-124) landed in a258a6f, test finalized in 2301d0c.
 
-Goal: prove over real HTTP that production mode without `ALLOW_DEMO_RESET` returns 403.
-This requires a live gateway that boots past `validateProductionConfig`
-(`packages/shared/config.mjs:29`, called synchronously at
-`services/api-gateway/src/index.mjs:17` — throws and crashes boot on failure) with a
-real authenticated admin session, since `isDemoResetAllowed()` is checked inside
-`perm("admin:reset")` after login + RBAC, both of which need a live DB.
-
-The blocker: `validateProductionConfig` rejects any `DATABASE_URL` containing
-`"127.0.0.1"`, `"localhost"`, or `"treasury_dev"` (a pure string check, not a
-connectivity check — `config.mjs:47-51`). I tested the obvious workaround — pointing
-`DATABASE_ADMIN_URL` at the IPv6 loopback (`[::1]`), which the local Postgres server
-itself accepts (`psql "postgres://[::1]:5432/postgres" -c "select 1"` succeeds, and
-`pg.Client({host:"::1",...})` with discrete fields succeeds) — and confirmed it does
-NOT work: `pg.Client({connectionString:"postgres://[::1]:5432/postgres"})` fails with
-`getaddrinfo ENOTFOUND [::1]` (a known `pg-connection-string` limitation with bracketed
-IPv6). Since `tests/helpers/stack.mjs` and every service build `DATABASE_URL` as a
-connection string (never discrete host/port fields), this is a real dead end, not
-something more code cleverness fixes without a broader refactor.
-
-Three options for Flo (none implemented — this is an infra/test-architecture decision):
-
-- **A.** Point the test DB at genuinely non-local infrastructure (e.g. a Dockerized
-  Postgres reachable by container hostname). Honest, but adds a new dependency
-  (Docker) to the test suite.
-- **B.** Add a narrow, explicitly-named test-only exception to
-  `validateProductionConfig`'s DB-locality check (e.g. recognizing the
-  `treasury_test_` prefix `stack.mjs` already uses). Touches the production config
-  gate itself — needs sign-off even though narrow, since this is exactly the kind of
-  auth/production-policy change `AGENTS.md` reserves for Flo.
-- **C.** Test only the route-wiring (`perm("admin:reset")` + `isDemoResetAllowed()`
-  composition) below full HTTP, skipping `validateProductionConfig` entirely. Cheaper
-  but weaker — both `HANDOFF.md` and `V8_EXECUTION_INSTRUCTION.md` ask for an
-  HTTP-level adversarial test specifically, and 0.1.1's unit tests already cover
-  `isDemoResetAllowed()` in isolation, so this would mostly re-test what 0.1.1 already
-  proved rather than closing the real gap (route wiring under a live boot).
-
-Explicitly not done: gaming the string check with a numeric-shorthand IP (e.g.
-`"127.1"`, which some resolvers treat as `127.0.0.1`) — it would pass the check while
-still literally being local dev infrastructure, defeating the point of the check.
+Closure note: the A/B/C Docker unblocker options above are superseded — Flo confirmed 2026-08-09 the existing coverage satisfies the acceptance criterion; 0.1.4 ticked in docs/V8_TASK_LIST.md, resolution recorded in PROJECT_STATE.md session log (2026-08-09).
 
 ## Completed: Epic 0.2 — outbox DLQ / poison-event handling (Claude, this session, H3)
 
@@ -240,7 +202,7 @@ No V8 commit exists. Preserve all current changes. At handoff time the branch is
 | `services/reconciliation-service/src/seed.mjs` | Codex 0.1.2 | Scopes FK-ordered statement-line/statement/reconciliation deletes and seed inserts to `tenantId`; Nordic/unknown profiles restore empty. |
 | `tests/integration/auth-rbac.test.mjs` | Codex 0.1.2 + Claude 0.1.3 | Codex: authenticated tenant-2 reset coverage across gateway fan-out, all domain data, tenant-1 non-mutation, Nordic restoration, empty Nordic transient domains, unchanged global payment sequence. Claude: symmetric tenant-1 reset test (mirrors Codex's tenant-2 test) + RBAC-surface bite test asserting admin:reset is granted to exactly {tenant-1 Admin, tenant-2 Admin}. |
 | `PROJECT_STATE.md` | inherited + Codex | Records 0.1.1 and 0.1.2 decisions, implementation, test evidence, residual risks, and next task. |
-| `docs/V8_TASK_LIST.md` | prior planning + Codex + Claude | Authoritative V8 backlog; 0.1.1–0.1.3 checked complete, 0.1.4 marked BLOCKED. File remains untracked. |
+| `docs/V8_TASK_LIST.md` | prior planning + Codex + Claude | Authoritative V8 backlog; 0.1.1–0.1.4 checked complete (0.1.4 closed 2026-08-09). Committed with the audit-fixes plan. |
 | `docs/V8_FINAL_PLAN.md` | prior planning | Locked V8 decisions and phase exits; untracked. |
 | `docs/V8_IMPLEMENTATION_PLAN.md` | prior planning | Full epic/task acceptance criteria; untracked. |
 | `docs/V8_EXECUTION_INSTRUCTION.md` | prior planning | Execution order, gates, and verification commands; untracked. |
