@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { verifyAuditChain } from "../../../packages/shared/audit.mjs";
-import { query } from "../../../packages/shared/db.mjs";
+import { query, withTransaction } from "../../../packages/shared/db.mjs";
+import { appendOutboxEvents } from "../../../packages/shared/outbox.mjs";
 import { claimJobs, completeJob, failJob } from "../../../packages/shared/jobs.mjs";
 import { moneyNumber } from "../../../packages/shared/money.mjs";
 import { serviceGet, servicePost } from "../../../packages/shared/service-client.mjs";
@@ -95,21 +96,38 @@ registerHandler("execute-payment", async (job) => {
 });
 
 // — payment-auto-expiry handler (multi-tenant) —
+// The cancel and its audit outbox events share one transaction: an expired payment is never
+// cancelled without a chained audit row (audit finding #5). Mirrors the payment-service
+// cancel-path pattern (appendOutboxEvents + withTenant).
 registerHandler("payment-auto-expiry", async () => {
   const tenantIds = await getActiveTenants();
   let totalExpired = 0;
   const allExpiredIds = [];
   for (const tenantId of tenantIds) {
-    const { rows } = await query(
-      "payment",
-      `UPDATE payment.payments
-       SET status = 'Cancelled'
-       WHERE status = 'Pending approval'
-         AND tenant_id = $1
-         AND created_at < now() - INTERVAL '72 hours'
-       RETURNING id, reference`,
-      [tenantId]
-    );
+    // withTransaction resolves to the callback's return value — the row array itself.
+    const rows = await withTransaction("payment", async (client) => {
+      const res = await client.query(
+        `UPDATE payment.payments
+         SET status = 'Cancelled'
+         WHERE status = 'Pending approval'
+           AND tenant_id = $1
+           AND created_at < now() - INTERVAL '72 hours'
+         RETURNING id, reference`,
+        [tenantId]
+      );
+      if (res.rows.length > 0) {
+        await appendOutboxEvents(client, withTenant(
+          res.rows.map((r) => ({
+            aggregateType: "payment",
+            aggregateId: r.id,
+            eventType: "audit.event_recorded",
+            payload: { actor: "System", action: "Payment expired", object: r.reference, detail: "Auto-cancelled after 72h" }
+          })),
+          tenantId
+        ));
+      }
+      return res.rows;
+    });
     if (rows.length > 0) {
       totalExpired += rows.length;
       allExpiredIds.push(...rows.map((r) => r.id));
@@ -317,6 +335,12 @@ async function evaluateWatchdogCheck(tenantId, check) {
       [tenantId, alertTitle]
     );
   }
+}
+
+// Same helper payment-service keeps local: appendOutboxEvents reads event.tenantId (or the
+// default tenant), so every outbox event must carry the tenant it belongs to.
+function withTenant(events, tenantId) {
+  return events.map((event) => ({ ...event, tenantId }));
 }
 
 async function executePaymentSaga(paymentId, jobId, tenantId = DEFAULT_TENANT_ID) {
