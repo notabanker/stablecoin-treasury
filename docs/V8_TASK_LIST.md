@@ -57,14 +57,14 @@ Companion to `docs/V8_IMPLEMENTATION_PLAN.md`. Task IDs are stable; dependencies
 
 - [ ] **0.4.1** — `SERVICE_DB_PASSWORD` prod gate (P0)
 - [ ] **0.4.2** — DB creator≠approver constraint (P0)
-- [ ] **0.4.3** — Remove token from login JSON (P1)
+- [x] **0.4.3** — Remove token from login JSON (P1) — closed by Q7 (cookie-only browser login, commit 2301d0c)
 - [ ] **0.4.4** — Multi-tenant watchdog + expiry (P1)
 - [ ] **0.4.5** — Circuit breaker tests (P1)
 - [ ] **0.4.6** — Internal HMAC freshness (P1)
 - [ ] **0.4.7** — Delete dead `provider-adapter.mjs` (P2)
 - [ ] **0.4.8** — Strengthen saga-failure tests (P2)
 - [ ] **0.4.9** — Tighten per-table GRANTs (P2)
-- [ ] **0.4.10** — Approvals UI (M7) (P2)
+- [x] **0.4.10** — Approvals UI (M7) (P2) — closed by a258a6f (loadPaymentApprovals + approve-payment mutation in apps/web/main.js)
 
 ### Epic 0.5 — Documentation
 

@@ -1,8 +1,13 @@
 # Database
 
 One Postgres database, one schema per service. Every table carries `tenant_id` referencing
-`identity.tenants`, even though only one tenant is seeded today (`packages/shared/tenant.mjs`
-holds the constant every service uses until real auth/tenancy lands).
+`identity.tenants`. Two tenants are seeded: Vega Industries SE (default,
+`00000000-0000-0000-0000-000000000001`, from `0001_identity.sql`) and Nordic Holdings AB
+(`00000000-0000-0000-0000-000000000002`, from `0021_second_tenant_seed.sql`, with a second
+tenant-2 user added in `0054_add_tenant2_user.sql`). `packages/shared/tenant.mjs` holds
+`DEFAULT_TENANT_ID` (tenant 1) and the tenant-header resolution used by every service until
+real auth/tenancy lands; a missing header defaults to tenant 1 unless the required-header
+option or `TENANT_HEADER_REQUIRED=true` is set.
 
 ## Schemas
 

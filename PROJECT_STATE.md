@@ -89,6 +89,17 @@ Verification: `npm run check`; **76 unit + 90 integration + 4 concurrency = 170 
 ## Session Log
 
 ```text
+Date: 2026-08-09
+Agent: Claude
+Task: Task F12 (2026-08-09 audit-fixes) — docs drift repair: test counts, tenant seeding, V8 0.4.3/0.4.10
+Files changed: docs/PRODUCTION_READINESS.md (test suite counts 151 → 179: 79 unit + 96 integration + 4 concurrency, re-verified by npm run test:all); docs/DATABASE.md (two tenants seeded — Vega Industries SE from 0001, Nordic Holdings AB from 0021/0054); docs/V8_TASK_LIST.md (0.4.3 ticked — closed by Q7 cookie-only login, commit 2301d0c; 0.4.10 ticked — approvals UI, closed by a258a6f); PROJECT_STATE.md
+Tests run: npm run test:all 179/179 pass (79 unit + 96 integration + 4 concurrency); npm run check pass
+Pointer-status note (per task F12 brief, root CLAUDE.md intentionally NOT edited — Prime Lab managed): this file's "Active References" and "Current Objective" still point at the V6 execution instruction (docs/V6_EXECUTION_INSTRUCTION.md / docs/V6_REMAINING_TASKS_INSTRUCTION.md), but the repo's current execution instruction is the 2026-08-09 audit-fixes plan (docs/superpowers/plans/2026-08-09-audit-fixes.md, tasks F1–F13). The plan dir is untracked; the V6 pointer will need a manual update once the audit-fixes plan is committed or closed.
+Next step: remaining audit-fixes tasks (F13 next); re-point PROJECT_STATE.md at the audit-fixes plan when it lands in the tree.
+Human decisions needed: none for F12.
+```
+
+```text
 Date: 2026-08-05
 Agent: Grok
 Task: Quality Q5 + Q7 + Q8 (Flo approved 1-3)
