@@ -42,9 +42,10 @@ jobs:
       - run: npm run test
       - run: npm run test:integration
       - run: npm run test:concurrency
+      - run: npm run db:setup
       - run: npm run invariants
         env:
-          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/treasury_dev
 
   image-scan:
     runs-on: ubuntu-latest
