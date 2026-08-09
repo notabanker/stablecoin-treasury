@@ -58,15 +58,22 @@ async function api(baseUrl, path, options = {}) {
   return { status: response.status, data };
 }
 
+// The signature is computed over the exact raw request bytes. The body is
+// pretty-printed so those bytes differ from any re-serialization of the parsed
+// JSON: a receiver that re-serializes before verifying must reject it.
+function rawBody(payload) {
+  return JSON.stringify(payload, null, 2);
+}
+
 function signature(payload) {
-  return createHmac("sha256", WEBHOOK_SECRET).update(JSON.stringify(payload)).digest("hex");
+  return createHmac("sha256", WEBHOOK_SECRET).update(rawBody(payload)).digest("hex");
 }
 
 function postWebhook(baseUrl, providerId, payload, webhookSignature) {
   return api(baseUrl, `/webhooks/${providerId}`, {
     method: "POST",
     headers: { "x-webhook-signature": webhookSignature },
-    body: JSON.stringify(payload)
+    body: rawBody(payload)
   });
 }
 

@@ -139,6 +139,10 @@
 - Use environment variables or a secrets manager
 - `INTERNAL_SERVICE_TOKEN` must be cryptographically random (64+ hex chars recommended)
 - `WEBHOOK_SECRET` should match the secret configured in `operations.providers.webhook_secret`
+- **Webhook signatures are computed over the exact raw request body bytes** (HMAC-SHA256,
+  hex, sent in the `x-webhook-signature` header). Senders must sign the bytes they transmit
+  verbatim — do not sign a re-serialization of the JSON. The gateway never re-serializes
+  before verifying; a signature over re-serialized JSON will be rejected.
 
 ## Local Development Defaults
 

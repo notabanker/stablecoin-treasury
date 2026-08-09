@@ -122,7 +122,7 @@ export function createJsonService({ name, port, routes, staticRoot, internalAuth
       const route = matchRoute(internalRoutes, req.method, url.pathname);
 
       if (route) {
-        const body = await readJson(req);
+        const { body, rawBody } = await readJson(req);
         // Extract acting user from the X-Acting-User header when present.
         // In internal-auth mode, validateInternalAuth verifies the payload signature;
         // in dev mode, the header is trusted as-is (dev ergonomics).
@@ -140,6 +140,7 @@ export function createJsonService({ name, port, routes, staticRoot, internalAuth
         }
         const context = {
           body,
+          rawBody,
           headers: req.headers,
           method: req.method,
           params: route.params,
@@ -285,7 +286,7 @@ export function validateInternalAuth(routeHandler, opts = {}) {
 
 async function readJson(req) {
   if (!["POST", "PUT", "PATCH"].includes(req.method)) {
-    return {};
+    return { body: {}, rawBody: "" };
   }
 
   const limitBytes = Number(process.env.HTTP_BODY_LIMIT_BYTES || 1_048_576);
@@ -298,12 +299,15 @@ async function readJson(req) {
     }
     chunks.push(chunk);
   }
-  const raw = Buffer.concat(chunks).toString("utf8").trim();
-  if (!raw) {
-    return {};
+  // rawBody carries the exact request bytes (untrimmed) for signature verification
+  // over the raw body; body is the parsed JSON as before.
+  const rawBody = Buffer.concat(chunks).toString("utf8");
+  const bodyText = rawBody.trim();
+  if (!bodyText) {
+    return { body: {}, rawBody: "" };
   }
   try {
-    return JSON.parse(raw);
+    return { body: JSON.parse(bodyText), rawBody };
   } catch (error) {
     throw httpError(400, "Request body must be valid JSON", "invalid_json");
   }

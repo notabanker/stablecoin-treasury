@@ -154,9 +154,9 @@ createJsonService({
       return ok({ ...result, state: await composeStateSafe(ctx) });
     })),
     // Webhook ingestion (V3.7)
-    route("POST", "/api/webhooks/:providerId", async ({ params, body, headers }) => {
+    route("POST", "/api/webhooks/:providerId", async ({ params, body, rawBody, headers }) => {
       const signature = headers["x-webhook-signature"] || "";
-      const result = await processWebhook(params.providerId, body, signature);
+      const result = await processWebhook(params.providerId, body, rawBody, signature);
       return ok(result);
     })
   ]

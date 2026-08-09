@@ -9,10 +9,8 @@ const OPS = "operations";
 // Counters exposed via gateway metrics.
 export const webhookMetrics = { signatureFailures: 0, processed: 0, duplicates: 0 };
 
-export function verifySignature(payload, secret, signature) {
-  const expected = createHmac("sha256", secret)
-    .update(JSON.stringify(payload))
-    .digest("hex");
+export function verifySignature(rawBody, secret, signature) {
+  const expected = createHmac("sha256", secret).update(String(rawBody)).digest("hex");
   const expectedBuffer = Buffer.from(expected, "hex");
   const providedBuffer = Buffer.from(String(signature || ""), "hex");
   return providedBuffer.length === expectedBuffer.length && timingSafeEqual(providedBuffer, expectedBuffer);
@@ -37,7 +35,7 @@ async function resolveProvider(providerId) {
 const PRODUCTION_MODE = process.env.PRODUCTION_MODE === "true";
 const DEMO_WEBHOOK_SECRET = process.env.DEMO_WEBHOOK_SECRET || "sandbox-webhook-secret";
 
-export async function processWebhook(providerId, body, signature) {
+export async function processWebhook(providerId, body, rawBody, signature) {
   const eventId = body.eventId || body.id;
   if (!eventId) {
     throw httpError(422, "Missing eventId in webhook payload", "missing_event_id");
@@ -59,7 +57,7 @@ export async function processWebhook(providerId, body, signature) {
     throw httpError(401, "Provider has no configured webhook secret", "missing_provider_secret");
   }
 
-  const signatureValid = verifySignature(body, secret, signature);
+  const signatureValid = verifySignature(rawBody, secret, signature);
   if (!signatureValid) {
     webhookMetrics.signatureFailures++;
     throw httpError(401, "Invalid webhook signature", "invalid_signature");
