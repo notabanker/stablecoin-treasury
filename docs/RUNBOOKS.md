@@ -158,7 +158,13 @@ again (e.g. after a restore); it never closes while the break persists.
 
 ## DB Invariant Checks
 
-Run periodically:
+Run periodically (automated; exits 0 when clean, 1 on any violation):
+```bash
+npm run invariants
+```
+
+The SQL below is kept as reference for what the script runs:
+
 ```sql
 -- Negative balances (must be 0)
 SELECT * FROM wallet.wallet_balances WHERE balance < 0;
