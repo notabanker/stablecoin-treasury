@@ -80,12 +80,12 @@ createJsonService({
       const result = await servicePost("payment", `/payments/${ctx.params.id}/cancel`, {}, paymentMutationOptions(ctx));
       return ok({ ...result, state: await composeStateSafe(ctx) });
     })),
-    route("GET", "/api/payments/:id/attempts", guard(async (ctx) => {
+    route("GET", "/api/payments/:id/attempts", paymentPerm("read")(guard(async (ctx) => {
       return ok({ attempts: await serviceGet("payment", `/payments/${ctx.params.id}/attempts`, tenantOptions(ctx)) });
-    })),
-    route("GET", "/api/payments/:id/approvals", guard(async (ctx) => {
+    }))),
+    route("GET", "/api/payments/:id/approvals", paymentPerm("read")(guard(async (ctx) => {
       return ok(await serviceGet("payment", `/payments/${ctx.params.id}/approvals`, tenantOptions(ctx)));
-    })),
+    }))),
     route("POST", "/api/policies", perm("policy:update")(async (ctx) => {
       await servicePost("policy", "/policies", ctx.body, tenantOptions(ctx));
       await servicePost("operations", "/audit", {
@@ -146,9 +146,9 @@ createJsonService({
       }, tenantOptions(ctx));
       return ok({ state: await composeStateSafe(ctx) });
     })),
-    route("GET", "/api/repair", guard(async (ctx) => {
+    route("GET", "/api/repair", paymentPerm("execute")(guard(async (ctx) => {
       return ok(await serviceGet("payment", "/repair", tenantOptions(ctx)));
-    })),
+    }))),
     route("POST", "/api/repair/:id/retry", paymentPerm("execute")(async (ctx) => {
       const result = await servicePost("payment", `/repair/${ctx.params.id}/retry`, {}, tenantOptions(ctx));
       return ok({ ...result, state: await composeStateSafe(ctx) });

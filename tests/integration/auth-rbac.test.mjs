@@ -426,6 +426,77 @@ test("admin:reset is granted only to each tenant's Admin role, not broadened to 
   ]);
 });
 
+// F3 — read routes enforce payment:read; GET /api/repair requires payment:execute.
+// Approved matrix (2026-08-09): payment:read on all four tenant roles (analyst, approver,
+// treasury-manager, admin); repair additionally requires payment:execute (treasury-manager + admin).
+test("F3: attempts/approvals require payment:read; /api/repair requires payment:execute", async (t) => {
+  const previousAuthRequired = process.env.AUTH_REQUIRED;
+  process.env.AUTH_REQUIRED = "true";
+  const stack = await startStack();
+  t.after(async () => {
+    if (previousAuthRequired === undefined) delete process.env.AUTH_REQUIRED;
+    else process.env.AUTH_REQUIRED = previousAuthRequired;
+    await stack.stop();
+  });
+
+  const adminLogin = await login(stack.baseUrl, "marta@vega-industries.com");
+  const approverLogin = await login(stack.baseUrl, "approver@vega-industries.com");
+  const t2AdminLogin = await login(stack.baseUrl, "admin@nordic-holdings.com");
+  const analystLogin = await login(stack.baseUrl, "maria@nordic.corp");
+  assert.equal(adminLogin.status, 200);
+  assert.equal(approverLogin.status, 200);
+  assert.equal(t2AdminLogin.status, 200);
+  assert.equal(analystLogin.status, 200);
+
+  const adminHeaders = { Authorization: `Bearer ${adminLogin.data.session.token}` };
+  const approverHeaders = { Authorization: `Bearer ${approverLogin.data.session.token}` };
+  const t2AdminHeaders = { Authorization: `Bearer ${t2AdminLogin.data.session.token}` };
+  const analystHeaders = { Authorization: `Bearer ${analystLogin.data.session.token}` };
+
+  // One payment per tenant so each role reads within its own tenant.
+  const t1Create = await api(stack.baseUrl, "/payments", {
+    method: "POST",
+    headers: { ...adminHeaders, "Idempotency-Key": "f3-read-t1" },
+    body: JSON.stringify({ amount: 100, counterpartyId: "cp-nordic", sourceWalletId: "wal-de-eur", type: "Supplier" })
+  });
+  assert.equal(t1Create.status, 200, JSON.stringify(t1Create.data));
+  const t1PaymentId = t1Create.data.payment.id;
+
+  const t2Create = await api(stack.baseUrl, "/payments", {
+    method: "POST",
+    headers: { ...t2AdminHeaders, "Idempotency-Key": "f3-read-t2" },
+    body: JSON.stringify({ amount: 1000, counterpartyId: "cp-nordic-steel", sourceWalletId: "wal-nordic-eur", type: "Supplier" })
+  });
+  assert.equal(t2Create.status, 200, JSON.stringify(t2Create.data));
+  const t2PaymentId = t2Create.data.payment.id;
+
+  // payment:read → 200 for admin, approver and analyst on their own tenants' payments.
+  const t1Attempts = await api(stack.baseUrl, `/payments/${t1PaymentId}/attempts`, { headers: adminHeaders });
+  assert.equal(t1Attempts.status, 200);
+  const t1Approvals = await api(stack.baseUrl, `/payments/${t1PaymentId}/approvals`, { headers: adminHeaders });
+  assert.equal(t1Approvals.status, 200);
+  const approverAttempts = await api(stack.baseUrl, `/payments/${t1PaymentId}/attempts`, { headers: approverHeaders });
+  assert.equal(approverAttempts.status, 200);
+  const approverApprovals = await api(stack.baseUrl, `/payments/${t1PaymentId}/approvals`, { headers: approverHeaders });
+  assert.equal(approverApprovals.status, 200);
+  const analystAttempts = await api(stack.baseUrl, `/payments/${t2PaymentId}/attempts`, { headers: analystHeaders });
+  assert.equal(analystAttempts.status, 200);
+  const analystApprovals = await api(stack.baseUrl, `/payments/${t2PaymentId}/approvals`, { headers: analystHeaders });
+  assert.equal(analystApprovals.status, 200);
+
+  // repair requires payment:execute → admin 200 (both tenants), analyst/approver 403.
+  const adminRepair = await api(stack.baseUrl, "/repair", { headers: adminHeaders });
+  assert.equal(adminRepair.status, 200);
+  const t2AdminRepair = await api(stack.baseUrl, "/repair", { headers: t2AdminHeaders });
+  assert.equal(t2AdminRepair.status, 200);
+  const approverRepair = await api(stack.baseUrl, "/repair", { headers: approverHeaders });
+  assert.equal(approverRepair.status, 403);
+  assert.equal(approverRepair.data.error, "forbidden");
+  const analystRepair = await api(stack.baseUrl, "/repair", { headers: analystHeaders });
+  assert.equal(analystRepair.status, 403);
+  assert.equal(analystRepair.data.error, "forbidden");
+});
+
 test("dev auth mode honors a supplied session tenant instead of forcing the default tenant", async (t) => {
   const previousAuthRequired = process.env.AUTH_REQUIRED;
   delete process.env.AUTH_REQUIRED;
