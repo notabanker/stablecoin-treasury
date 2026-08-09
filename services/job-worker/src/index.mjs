@@ -348,7 +348,7 @@ async function evaluateWatchdogCheck(tenantId, check) {
         `INSERT INTO operations.alerts (id, tenant_id, severity, title, detail, status)
          VALUES ($1, $2, $3, $4, $5, 'Open')`,
         [alertId, tenantId, "High", alertTitle,
-         `${check.type}: ${check.count} > ${check.threshold}. Outbox lag: ${check.count}ms.`]
+         `${check.type}: ${check.count} > ${check.threshold}`]
       );
     }
   } else if (existing.length > 0) {
@@ -649,13 +649,13 @@ while (running) {
       const handler = handlers[job.type];
       if (!handler) {
         metrics.noHandler++;
-        console.warn(JSON.stringify({
+        console.error(JSON.stringify({
           at: new Date().toISOString(),
           event: "job_no_handler",
           jobId: job.id,
           type: job.type
         }));
-        await completeJob(job.id, { attemptNo: job.attempts, durationMs: Date.now() - startedAt });
+        await failJob(job.id, `Unknown job type: ${job.type}`, { maxAttempts: job.max_attempts });
         continue;
       }
       try {
@@ -664,7 +664,7 @@ while (running) {
         await completeJob(job.id, { attemptNo: job.attempts, durationMs: Date.now() - startedAt });
       } catch (error) {
         metrics.failed++;
-        if (job.attempts + 1 >= job.max_attempts) metrics.deadLettered++;
+        if (job.attempts >= job.max_attempts) metrics.deadLettered++;
         console.error(JSON.stringify({
           at: new Date().toISOString(),
           event: "job_failed",
