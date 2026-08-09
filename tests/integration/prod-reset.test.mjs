@@ -19,7 +19,7 @@ async function loginAdmin(baseUrl) {
   const loginRes = await fetch(`${baseUrl}/api/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123" })
+    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123", client: "api" })
   });
   assert.equal(loginRes.status, 200, "admin login required for production-mode reset tests");
   const session = extractCookie(loginRes.headers.getSetCookie?.() || [], "session");

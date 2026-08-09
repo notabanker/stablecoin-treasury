@@ -35,6 +35,7 @@
 | `LOGIN_LOCKOUT_MS` | `300000` | Lockout duration |
 | `TRUST_PROXY_HEADERS` | unset | Honor `X-Forwarded-For` for client IP (see below) |
 | `ALLOW_DEMO_RESET` | unset | Gates `POST /api/reset`. Ignored outside production (reset always allowed in dev/demo, incl. `npm run smoke`). When `PRODUCTION_MODE=true`, reset returns `403 demo_reset_disabled` unless this is exactly `true`. |
+| `TENANT_HEADER_REQUIRED` | unset | When exactly `"true"`, missing `X-Tenant-Id` returns `400 tenant_required` on non-public service routes (Q5). Invalid UUIDs always return `400 invalid_tenant`. Public routes (`/health`, `/ready`) never require the header. Gateway always forwards the session tenant on authenticated calls. |
 | `SESSION_IDLE_TTL_MINUTES` | `0` (disabled) | Idle timeout: session expires after N minutes of inactivity. When set, `validateSession` bumps `expires_at` forward on each request (at most once per minute). |
 | `SESSION_ABSOLUTE_TTL_HOURS` | `24` | Absolute max session lifetime from `created_at`; idle-timeout bumps never exceed this cap. |
 | `WATCHDOG_INTERVAL_MS` | `60000` | Ops-watchdog evaluation interval. Set to `0` to disable watchdog scheduling. |

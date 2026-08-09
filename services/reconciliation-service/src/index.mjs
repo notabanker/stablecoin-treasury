@@ -2,6 +2,7 @@ import { createId } from "../../../packages/shared/data.mjs";
 import { query, withTransaction, runWithTenant } from "../../../packages/shared/db.mjs";
 import { createJsonService, httpError, ok, route } from "../../../packages/shared/http.mjs";
 import { enqueueJobInTx } from "../../../packages/shared/jobs.mjs";
+import { moneyNumber } from "../../../packages/shared/money.mjs";
 import { withInboxDedup } from "../../../packages/shared/outbox.mjs";
 import { serviceGet } from "../../../packages/shared/service-client.mjs";
 import { DEFAULT_TENANT_ID, tenantIdFromHeaders } from "../../../packages/shared/tenant.mjs";
@@ -84,7 +85,7 @@ createJsonService({
         paymentId: payment.id,
         source: body.source || "Policy engine",
         issue: body.issue || "Manual exception",
-        amount: Number(body.amount ?? payment.amount),
+        amount: moneyNumber(body.amount ?? payment.amount),
         asset: body.asset || payment.asset,
         status: "Open",
         owner: body.owner || "Treasury Ops"
@@ -158,7 +159,7 @@ function withComputedAge(row) {
     paymentId: row.payment_id,
     source: row.source,
     issue: row.issue,
-    amount: Number(row.amount),
+    amount: moneyNumber(row.amount),
     asset: row.asset,
     status: row.status,
     owner: row.owner,
@@ -198,7 +199,7 @@ async function ingestStatement(body, tenantId) {
     throw httpError(422, "Statement must contain at least one line", "missing_lines");
   }
   for (const line of lines) {
-    if (!line.providerRef || !Number.isFinite(Number(line.amount)) || !line.asset) {
+    if (!line.providerRef || !Number.isFinite(moneyNumber(line.amount)) || !line.asset) {
       throw httpError(422, "Every line needs providerRef, finite amount, and asset", "invalid_line");
     }
   }
@@ -216,7 +217,7 @@ async function ingestStatement(body, tenantId) {
         await client.query(
           `INSERT INTO reconciliation.statement_lines (tenant_id, statement_id, provider_ref, amount, asset, occurred_at, raw)
            VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          [tenantId, rows[0].id, line.providerRef, Number(line.amount), line.asset, line.occurredAt || null, JSON.stringify(line.raw || {})]
+          [tenantId, rows[0].id, line.providerRef, moneyNumber(line.amount), line.asset, line.occurredAt || null, JSON.stringify(line.raw || {})]
         );
       }
       // Enqueue the match job inside the same transaction so that a crash after commit
@@ -318,7 +319,7 @@ async function matchStatement(statementId, tenantId) {
         paymentId: payment.id,
         source: "Provider statement",
         issue: "Matched",
-        amount: Number(line.amount),
+        amount: moneyNumber(line.amount),
         asset: line.asset,
         status: "Resolved",
         owner: "Auto"
@@ -340,15 +341,15 @@ async function matchStatement(statementId, tenantId) {
     );
     if (dupRows[0].count > 0 || matchedRefs.has(line.provider_ref)) {
       await setLine(client, line.id, "exception", null);
-      await openException(client, `stmt:${line.id}`, "Duplicate statement line for already-matched transfer", Number(line.amount), line.asset, "duplicate");
+      await openException(client, `stmt:${line.id}`, "Duplicate statement line for already-matched transfer", moneyNumber(line.amount), line.asset, "duplicate");
       continue;
     }
 
     const payment = byProviderRef.get(line.provider_ref);
     if (payment) {
-      const lineAmount = Number(line.amount);
-      const payAmount = Number(payment.amount);
-      const fee = Number(payment.fee || 0);
+      const lineAmount = moneyNumber(line.amount);
+      const payAmount = moneyNumber(payment.amount);
+      const fee = moneyNumber(payment.fee || 0);
       if (lineAmount === payAmount) {
         await markMatched(client, line, payment, 1.0);
         matchedRefs.add(line.provider_ref);
@@ -366,7 +367,7 @@ async function matchStatement(statementId, tenantId) {
     const heuristic = payments.find((p) =>
       p.status === "Settled" &&
       p.asset === line.asset &&
-      Number(p.amount) === Number(line.amount) &&
+      moneyNumber(p.amount) === moneyNumber(line.amount) &&
       !matchedRefs.has(p.providerRef) &&
       line.occurred_at && p.settledAt &&
       new Date(p.settledAt).toISOString().slice(0, 10) === new Date(line.occurred_at).toISOString().slice(0, 10)
@@ -378,7 +379,7 @@ async function matchStatement(statementId, tenantId) {
     }
 
     await setLine(client, line.id, "exception", null);
-    await openException(client, `stmt:${line.id}`, "Statement line has no matching payment", Number(line.amount), line.asset, "missing_ours");
+    await openException(client, `stmt:${line.id}`, "Statement line has no matching payment", moneyNumber(line.amount), line.asset, "missing_ours");
   }
 
   // missing_theirs: only when the statement declares a period — settled payments inside
@@ -392,7 +393,7 @@ async function matchStatement(statementId, tenantId) {
       if (payment.status !== "Settled" || !payment.settledAt || !payment.providerRef) continue;
       const settled = new Date(payment.settledAt);
       if (settled >= new Date(statement.period_start) && settled <= new Date(statement.period_end) && !lineRefs.has(payment.providerRef)) {
-        await openException(client, payment.id, "Settled payment missing from provider statement", Number(payment.amount), payment.asset, "missing_theirs");
+        await openException(client, payment.id, "Settled payment missing from provider statement", moneyNumber(payment.amount), payment.asset, "missing_theirs");
       }
     }
   }

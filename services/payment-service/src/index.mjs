@@ -1,6 +1,7 @@
 import { createId, estimateFee } from "../../../packages/shared/data.mjs";
 import { query, withTransaction, runWithTenant } from "../../../packages/shared/db.mjs";
 import { createJsonService, httpError, ok, route } from "../../../packages/shared/http.mjs";
+import { moneyNumber, parseMoneyInput } from "../../../packages/shared/money.mjs";
 import { serviceGet, servicePost } from "../../../packages/shared/service-client.mjs";
 import { DEFAULT_TENANT_ID, tenantIdFromHeaders } from "../../../packages/shared/tenant.mjs";
 import { validateProductionConfig } from "../../../packages/shared/config.mjs";
@@ -48,7 +49,13 @@ async function paymentExtraMetrics() {
       data: { paymentsByState: byState, sagaStepFailures: sagaFailures, stuckExecuting }
     };
     return paymentMetricsCache.data;
-  } catch {
+  } catch (error) {
+    console.error(JSON.stringify({
+      at: new Date().toISOString(),
+      service: "payment-service",
+      event: "payment_metrics_failed",
+      message: error.message
+    }));
     return paymentMetricsCache.data;
   }
 }
@@ -103,8 +110,13 @@ async function createPayment(input, idempotencyKey, tenantId = DEFAULT_TENANT_ID
     const wallet = await serviceGet("wallet", `/wallets/${input.sourceWalletId}`, { tenantId });
     const counterparty = await serviceGet("compliance", `/counterparties/${input.counterpartyId}`, { tenantId });
     const policy = await serviceGet("policy", "/policies", { tenantId });
-    const amount = Number(input.amount || 0);
-    if (!Number.isFinite(amount) || amount <= 0) {
+    let amount;
+    try {
+      amount = parseMoneyInput(input.amount ?? 0).toNumber();
+    } catch {
+      throw httpError(422, "Payment amount must be positive", "invalid_amount");
+    }
+    if (!(amount > 0)) {
       throw httpError(422, "Payment amount must be positive", "invalid_amount");
     }
 
@@ -544,8 +556,8 @@ function fromRow(row) {
     sourceWalletId: row.source_wallet_id,
     counterpartyId: row.counterparty_id,
     asset: row.asset,
-    amount: Number(row.amount),
-    fee: Number(row.fee),
+    amount: moneyNumber(row.amount),
+    fee: moneyNumber(row.fee),
     status: row.status,
     approvals: row.approvals,
     requiredApprovals: row.required_approvals,

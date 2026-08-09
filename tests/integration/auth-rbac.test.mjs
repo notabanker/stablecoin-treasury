@@ -15,9 +15,33 @@ async function api(baseUrl, path, options = {}) {
 async function login(baseUrl, email) {
   return api(baseUrl, "/login", {
     method: "POST",
-    body: JSON.stringify({ email, password: "demo123" })
+    body: JSON.stringify({ email, password: "demo123", client: "api" })
   });
 }
+
+test("browser login omits session token from JSON; API client opt-in returns it (Q7)", async (t) => {
+  const previousAuthRequired = process.env.AUTH_REQUIRED;
+  process.env.AUTH_REQUIRED = "true";
+  const stack = await startStack();
+  t.after(async () => {
+    if (previousAuthRequired === undefined) delete process.env.AUTH_REQUIRED;
+    else process.env.AUTH_REQUIRED = previousAuthRequired;
+    await stack.stop();
+  });
+
+  const browserLogin = await api(stack.baseUrl, "/login", {
+    method: "POST",
+    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123" })
+  });
+  assert.equal(browserLogin.status, 200);
+  assert.equal(browserLogin.data.session?.token, undefined, "browser login must not expose session token in body");
+  assert.ok(browserLogin.data.session?.csrfToken, "csrf still returned for double-submit");
+  assert.ok(browserLogin.data.user?.id);
+
+  const apiLogin = await login(stack.baseUrl, "marta@vega-industries.com");
+  assert.equal(apiLogin.status, 200);
+  assert.ok(apiLogin.data.session?.token, "client:api must still receive bearer token for scripts/tests");
+});
 
 test("AUTH_REQUIRED gates mutating routes and enforces payment:create permission", async (t) => {
   const previousAuthRequired = process.env.AUTH_REQUIRED;
@@ -475,7 +499,7 @@ test("cookie-authenticated POST /api/logout without X-Csrf-Token returns 403", a
 
   const loginRes = await fetchRaw(stack.baseUrl, "/login", {
     method: "POST",
-    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123" })
+    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123", client: "api" })
   });
   assert.equal(loginRes.status, 200);
   const sessionCookie = extractCookie(loginRes.setCookie, "session");
@@ -502,7 +526,7 @@ test("cookie-authenticated POST /api/logout with correct X-Csrf-Token returns 20
 
   const loginRes = await fetchRaw(stack.baseUrl, "/login", {
     method: "POST",
-    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123" })
+    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123", client: "api" })
   });
   const sessionCookie = extractCookie(loginRes.setCookie, "session");
   const csrfToken = extractCookie(loginRes.setCookie, "csrf");
@@ -531,7 +555,7 @@ test("secure mode uses __Host cookies and logout clears them with Secure", async
 
   const loginRes = await fetchRaw(stack.baseUrl, "/login", {
     method: "POST",
-    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123" })
+    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123", client: "api" })
   });
   assert.equal(loginRes.status, 200);
   const sessionCookie = extractCookie(loginRes.setCookie, "__Host-session");
@@ -564,7 +588,7 @@ test("session idle timeout expires inactive cookie sessions", async (t) => {
 
   const loginRes = await fetchRaw(stack.baseUrl, "/login", {
     method: "POST",
-    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123" })
+    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123", client: "api" })
   });
   assert.equal(loginRes.status, 200);
   const sessionCookie = extractCookie(loginRes.setCookie, "session");
@@ -592,7 +616,7 @@ test("cookie-authenticated POST /api/payments with null csrf_token is rejected b
 
   const loginRes = await fetchRaw(stack.baseUrl, "/login", {
     method: "POST",
-    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123" })
+    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123", client: "api" })
   });
   const sessionCookie = extractCookie(loginRes.setCookie, "session");
   assert.ok(sessionCookie);

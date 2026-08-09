@@ -202,3 +202,20 @@ test("validatePolicy rejects concentrationLimit outside (0, 1]", () => {
 test("validatePolicy rejects a non-positive hardTransferLimit", () => {
   assert.throws(() => validatePolicy({ ...policies, hardTransferLimit: 0 }));
 });
+
+test("evaluate handles floating-point amounts and fees cent-stably", () => {
+  // In JS float math, 0.1 + 0.2 = 0.30000000000000004
+  const result = evaluate(
+    {
+      payment: basePayment({ amount: 0.1, fee: 0.2 }),
+      wallet: { balance: 0.3, asset: "EURC" },
+      asset: baseAsset,
+      counterparty: baseCounterparty,
+      provider: baseProvider
+    },
+    policies
+  );
+  assert.equal(result.checks.find((c) => c.label === "Balance").status, "Clear");
+  assert.equal(result.decision.status, "Clear");
+});
+

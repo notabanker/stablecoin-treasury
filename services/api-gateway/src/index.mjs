@@ -204,14 +204,16 @@ async function login(body, ctx) {
     sessionCookieHeader(session.token, session.expiresAt),
     csrfCookieHeader(session.csrfToken, session.expiresAt)
   ];
-  const productionMode = process.env.PRODUCTION_MODE === 'true';
+  // Q7 / V6 M1: default browser login is cookie-only — do not put the session token in JSON
+  // where XSS can read it. API clients (integration tests, scripts) opt in with client:"api".
+  const includeBearerToken = body?.client === "api" || body?.includeSessionToken === true;
   return {
     body: {
       user: { id: user.id, email: user.email, displayName: user.displayName, tenantId: user.tenantId, roles: user.roles },
       session: {
-        ...(productionMode ? {} : { token: session.token }),
+        ...(includeBearerToken ? { token: session.token } : {}),
         csrfToken: session.csrfToken,
-        expiresAt: session.expiresAt,
+        expiresAt: session.expiresAt
       },
       message: "Login successful"
     },

@@ -77,25 +77,55 @@ Default criteria for hardening tasks:
 
 ## Last Completed Work
 
-Epic 2.2 (row-level security) complete: tenant context via AsyncLocalStorage →
-transaction-local `app.tenant_id`, RLS on all 8 schemas (migrations 0037–0044), 5
-adversarial probes incl. a policy-drop bite test. Epic 2.1 verified and REPAIRED: the test
-harness had a duplicate-key bug that kept all test stacks on the admin connection (roles
-were never exercised by tests), plus a missing svc_gateway SELECT grant on platform.jobs
-(0036). All 118 tests pass (49 unit + 65 integration + 4 concurrency). Remaining: 2.3,
-Epic 5, 4.3, 7.1, 7.2, close-out.
+Quality hardening Q1–Q8 complete (see `docs/QUALITY_REMEDIATION_INSTRUCTION.md`):
+
+1. **Q1** UUID `createId` · **Q2** invalid tenant header 400 · **Q3/Q6** Money path · **Q4** log silent failures  
+2. **Q5** `TENANT_HEADER_REQUIRED=true` / `{ required: true }` → 400 `tenant_required` (public routes exempt)  
+3. **Q7** Browser login cookie-only (no session token in JSON); `client:"api"` opt-in for bearer (tests/scripts)  
+4. **Q8** Split `apps/web/main.js` → `apps/web/js/{state,util,api,views-*}.js` (all files ≤324 lines)
+
+Verification: `npm run check`; **76 unit + 90 integration + 4 concurrency = 170 pass**.
 
 ## Session Log
 
 ```text
-Date: 2026-07-06
-Agent: Fable5
-Task: Push to GitHub + CI repair
-Files changed: committed ec64725 (V6 checkpoint, 98 files), f2d241d (CI triggers on master — workflow only fired on PRs before; branches was [main] but repo uses master), 5fe4ce6 (SERVICE_DB_PASSWORD mismatch fix + Dockerfile hardening + untrack infra/.terraform)
-Tests run: local suite green pre-push; first-ever master-push CI run diagnosed: ALL integration tests failed at stack-ready timeout — svc_* role auth_failed because ci.yml set SERVICE_DB_PASSWORD=postgres while migration 0033 bakes 'service-dev-password' into the roles. KEY INSIGHT: local pg_hba is 'trust', so role passwords had NEVER been verified anywhere until this CI run. Trivy image-scan legitimately blocked on 14 HIGH CVEs (openssl base + npm's bundled deps) → fixed by apk upgrade + removing npm from the runtime image (services run plain node).
-Result: pushed; CI re-run for 5fe4ce6 pending (monitor armed).
-Next step: confirm CI green; then audit HIGH fixes (H1/H2/H3) or as directed.
-Human decisions needed: None for the push; audit fixes still await authorization.
+Date: 2026-08-05
+Agent: Grok
+Task: Quality Q5 + Q7 + Q8 (Flo approved 1-3)
+Files changed: packages/shared/{tenant,http}.mjs; services/api-gateway/src/index.mjs;
+  apps/web/main.js + apps/web/js/*; tests/unit/tenant.test.mjs; tests/integration/* login bodies;
+  docs/ENVIRONMENT.md; docs/QUALITY_REMEDIATION_INSTRUCTION.md; PROJECT_STATE.md
+Tests run: check pass; unit 76; integration 90 (incl. Q7 browser-login test); concurrency 4
+Result: PASS 170
+Next step: Q9–Q12 (mappers, lint, 0017 docs, rag quarantine) or V8 Phase 0 Epic 0.4 / 0.1.4
+Human decisions needed: none for Q5–Q8; 0.1.4 still needs Flo on prod-mode test DB URL
+```
+
+```text
+Date: 2026-08-05
+Agent: Antigravity
+Task: Quality audit remediation — Q6 (Finish Money adoption on remaining float sites)
+Files changed: services/policy-service/src/evaluate.mjs,
+  services/reconciliation-service/src/index.mjs,
+  tests/unit/policy-evaluate.test.mjs, PROJECT_STATE.md
+Tests run: npm run check (pass); npm run test (74); npm run test:integration (89); npm run test:concurrency (4); npm run test:all (167 pass)
+Result: PASS. Zero bare Number() coercions remain on amount/fee/balance domain fields across services/. Cent-precision float test added and passing.
+Next step: Task Q5 (require tenant header with flag — needs Flo approval) or Q7 (cookie-only session tokens — needs Flo approval) or P2 quality tasks.
+Human decisions needed: Approval for Q5 (tenant isolation flag) or Q7 (session token cookie-only contract change).
+```
+
+```text
+Date: 2026-08-05
+Agent: Grok
+Task: Quality audit remediation — UUID IDs, tenant fail-closed, Money path
+Files changed: packages/shared/{data,money,tenant,http,service-client}.mjs;
+  services/{payment,wallet,accounting,job-worker,reconciliation}/*;
+  tests/unit/{data,money,tenant}.test.mjs; PROJECT_STATE.md
+Tests run: npm run check; npm run test (73); npm run test:integration (89); npm run test:concurrency (4)
+Result: all green
+Next step: continue V8 Phase 0 (0.1.4 blocked on Flo; Epic 0.4 P0 next) or further quality
+  items (session token not in JSON body; split apps/web/main.js)
+Human decisions needed: none for this slice; 0.1.4 still needs Flo on prod-mode test DB URL
 ```
 
 ```text

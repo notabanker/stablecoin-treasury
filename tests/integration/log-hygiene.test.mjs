@@ -55,7 +55,7 @@ describe("log hygiene", () => {
     // 1. Login
     const loginRes = await api(stack.baseUrl, "/login", {
       method: "POST",
-      body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123" })
+      body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123", client: "api" })
     });
     assert.equal(loginRes.status, 200);
     const sessionCookie = extractCookie(loginRes.setCookie, "session");

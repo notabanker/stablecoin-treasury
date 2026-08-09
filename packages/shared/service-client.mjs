@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 export const serviceUrls = {
   wallet: process.env.WALLET_SERVICE_URL || "http://127.0.0.1:4101",
   policy: process.env.POLICY_SERVICE_URL || "http://127.0.0.1:4102",
@@ -64,7 +66,7 @@ export async function serviceRequest(service, path, options) {
         ...fetchInit,
         signal: controller.signal,
         headers: {
-          "X-Request-Id": options.requestId || Math.random().toString(36).slice(2, 12),
+          "X-Request-Id": options.requestId || cryptoRandomId(),
           ...(options.idempotencyKey ? { "Idempotency-Key": options.idempotencyKey } : {}),
           ...(options.tenantId ? { "X-Tenant-Id": options.tenantId } : {}),
           ...internalSig,
@@ -174,4 +176,8 @@ function normalizeError(service, error, timedOut = false) {
 function backoff(attempt) {
   const delayMs = Math.min(250 * 2 ** (attempt - 1), 1000);
   return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+function cryptoRandomId() {
+  return randomUUID();
 }

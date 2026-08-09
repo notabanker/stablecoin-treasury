@@ -1,3 +1,4 @@
+import { moneyNumber } from "../../../packages/shared/money.mjs";
 import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
 
 export async function getOrCreateWalletAccount(client, walletId, assetId, tenantId = DEFAULT_TENANT_ID) {
@@ -30,7 +31,7 @@ export async function getWalletBalance(client, walletId, tenantId = DEFAULT_TENA
     walletId,
     tenantId
   ]);
-  return rows[0] ? Number(rows[0].balance) : 0;
+  return rows[0] ? moneyNumber(rows[0].balance) : 0;
 }
 
 // Idempotent by (tenant_id, idempotency_key): a second call with the same key returns the

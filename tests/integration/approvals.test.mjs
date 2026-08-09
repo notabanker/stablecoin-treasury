@@ -53,7 +53,7 @@ test("two distinct approvers transition payment to Approved", async (t) => {
   // Login as marta (admin with approval permissions)
   const login1 = await api(stack.baseUrl, "/login", {
     method: "POST",
-    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123" })
+    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123", client: "api" })
   });
   assert.equal(login1.status, 200);
   const martaSession = extractCookie(login1.setCookie, "session");
@@ -67,7 +67,7 @@ test("two distinct approvers transition payment to Approved", async (t) => {
   // Login as approver
   const login2 = await api(stack.baseUrl, "/login", {
     method: "POST",
-    body: JSON.stringify({ email: "approver@vega-industries.com", password: "demo123" })
+    body: JSON.stringify({ email: "approver@vega-industries.com", password: "demo123", client: "api" })
   });
   assert.equal(login2.status, 200);
   const approverSession = extractCookie(login2.setCookie, "session");
@@ -133,7 +133,7 @@ test("creator self-approval above threshold returns 403", async (t) => {
 
   const login = await api(stack.baseUrl, "/login", {
     method: "POST",
-    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123" })
+    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123", client: "api" })
   });
   assert.equal(login.status, 200);
   const session = extractCookie(login.setCookie, "session");
@@ -189,7 +189,7 @@ test("N-1 distinct approvers leaves payment in PendingApproval", async (t) => {
   // Login as approver (not creator) to approve a payment created by another user
   const login = await api(stack.baseUrl, "/login", {
     method: "POST",
-    body: JSON.stringify({ email: "approver@vega-industries.com", password: "demo123" })
+    body: JSON.stringify({ email: "approver@vega-industries.com", password: "demo123", client: "api" })
   });
   assert.equal(login.status, 200);
   const approverSession = extractCookie(login.setCookie, "session");
@@ -199,7 +199,7 @@ test("N-1 distinct approvers leaves payment in PendingApproval", async (t) => {
   // Login as marta to create the payment
   const martaLogin = await api(stack.baseUrl, "/login", {
     method: "POST",
-    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123" })
+    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123", client: "api" })
   });
   assert.equal(martaLogin.status, 200);
   const martaSession = extractCookie(martaLogin.setCookie, "session");

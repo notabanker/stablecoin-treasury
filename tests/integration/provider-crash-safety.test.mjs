@@ -15,7 +15,7 @@ async function api(baseUrl, path, options = {}) {
 }
 
 async function login(baseUrl, email) {
-  return api(baseUrl, "/login", { method: "POST", body: JSON.stringify({ email, password: "demo123" }) });
+  return api(baseUrl, "/login", { method: "POST", body: JSON.stringify({ email, password: "demo123", client: "api" }) });
 }
 
 // Short-lived connection per call -- see the outbox-dlq.test.mjs / auth-rbac.test.mjs lesson

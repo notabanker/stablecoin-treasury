@@ -11,15 +11,15 @@ export function schedulePeriodicJobs() {
   enqueueExpiry().catch((e) => console.error("expiry initial enqueue failed:", e.message));
   if (WATCHDOG_INTERVAL_MS > 0) {
     enqueueWatchdog().catch((e) => console.error("watchdog initial enqueue failed:", e.message));
-    setInterval(() => enqueueWatchdog().catch(() => {}), WATCHDOG_INTERVAL_MS);
+    setInterval(() => enqueueWatchdog().catch((e) => console.error("watchdog enqueue failed:", e.message)), WATCHDOG_INTERVAL_MS);
   }
   if (AUDIT_CHAIN_VERIFY_INTERVAL_MS > 0) {
     enqueueAuditChainVerify().catch((e) => console.error("audit-chain-verify initial enqueue failed:", e.message));
-    setInterval(() => enqueueAuditChainVerify().catch(() => {}), AUDIT_CHAIN_VERIFY_INTERVAL_MS);
+    setInterval(() => enqueueAuditChainVerify().catch((e) => console.error("audit-chain-verify enqueue failed:", e.message)), AUDIT_CHAIN_VERIFY_INTERVAL_MS);
   }
 
-  setInterval(() => enqueueSweeper().catch(() => {}), IDEMPOTENCY_SWEEP_INTERVAL_MS);
-  setInterval(() => enqueueExpiry().catch(() => {}), AUTO_EXPIRY_INTERVAL_MS);
+  setInterval(() => enqueueSweeper().catch((e) => console.error("sweeper enqueue failed:", e.message)), IDEMPOTENCY_SWEEP_INTERVAL_MS);
+  setInterval(() => enqueueExpiry().catch((e) => console.error("expiry enqueue failed:", e.message)), AUTO_EXPIRY_INTERVAL_MS);
 }
 
 async function enqueueSweeper() {

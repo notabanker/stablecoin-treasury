@@ -155,9 +155,43 @@ export class Money {
 
 // ── Stateless helpers (drop-in for legacy roundMoney etc.) ──
 
+/**
+ * Coerce a Postgres numeric (string), JS number, or Money into a cent-rounded number.
+ * Prefer this over bare Number(row.amount) on money-path reads.
+ */
+export function moneyNumber(value) {
+  if (value === null || value === undefined || value === "") return 0;
+  if (value instanceof Money) return value.toNumber();
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return NaN;
+    return Money.fromNumber(value).toNumber();
+  }
+  const parsed = Money.fromNumeric(value);
+  return parsed ? parsed.toNumber() : 0;
+}
+
+/**
+ * Parse API/user input into Money. Accepts numbers or decimal strings (optional commas).
+ * Throws RangeError on empty, non-finite, or non-numeric input.
+ */
+export function parseMoneyInput(value) {
+  if (value === null || value === undefined || value === "") {
+    throw new RangeError("empty money value");
+  }
+  if (value instanceof Money) return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new RangeError("non-finite money value");
+    return Money.fromNumber(value);
+  }
+  const clean = String(value).replace(/[,\s]/g, "");
+  if (!/^-?\d+(\.\d+)?$/.test(clean)) throw new RangeError("invalid money format");
+  return Money.fromString(clean);
+}
+
 /** Round a numeric value to 2 decimal places (legacy-compatible). Returns a number. */
 export function roundMoney(value) {
-  return Math.round(Number(value) * 100) / 100;
+  if (value instanceof Money) return value.toNumber();
+  return Money.fromNumber(Number(value)).toNumber();
 }
 
 /** Format a numeric value for display, e.g. "€1,234.56". */

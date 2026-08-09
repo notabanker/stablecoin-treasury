@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { DEFAULT_TENANT_ID } from "./tenant.mjs";
-import { roundMoney } from "./money.mjs";
+import { Money, parseMoneyInput, roundMoney } from "./money.mjs";
 
 const NORDIC_DEMO_TENANT_ID = "00000000-0000-0000-0000-000000000002";
 
@@ -529,13 +530,19 @@ function createEmptySeedData() {
   };
 }
 
+/** Durable entity id: prefix + crypto UUID (not Math.random). */
 export function createId(prefix) {
-  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  return `${prefix}-${randomUUID()}`;
 }
 
+/**
+ * Estimate network/provider fee in major units (cent-rounded).
+ * Uses Money so 1000 * 0.00009 + base does not accumulate float noise.
+ */
 export function estimateFee(amount, asset) {
-  const base = asset === "USDC" ? 3.2 : 2.4;
-  return roundMoney(base + amount * 0.00009);
+  const principal = amount instanceof Money ? amount : parseMoneyInput(amount ?? 0);
+  const base = Money.fromString(asset === "USDC" ? "3.20" : "2.40");
+  return principal.times(0.00009).plus(base).toNumber();
 }
 
 export function nextPaymentReference(payments) {

@@ -151,9 +151,14 @@ export function createJsonService({ name, port, routes, staticRoot, internalAuth
         };
         // Enter the tenant context for RLS: db.mjs picks this up and sets the
         // transaction-local app.tenant_id that row-level security policies check.
-        // Matches tenantIdFromHeaders semantics handlers already use for scoping
-        // (missing/invalid header falls back to the default tenant).
-        const result = await runWithTenant(tenantIdFromHeaders(req.headers), () => route.handler(context));
+        // Missing header → default tenant (or 400 when TENANT_HEADER_REQUIRED and non-public);
+        // present-but-invalid UUID → 400 (fail closed). Public routes (health/ready) never
+        // require a tenant header so probes stay unauthenticated and header-free.
+        const tenantRequired = process.env.TENANT_HEADER_REQUIRED === "true" && !route.public;
+        const result = await runWithTenant(
+          tenantIdFromHeaders(req.headers, { required: tenantRequired }),
+          () => route.handler(context)
+        );
         // Route handlers can set cookies by returning a `cookies` array of Set-Cookie strings.
         if (result?.cookies?.length) {
           res.setHeader("Set-Cookie", [...result.cookies]);

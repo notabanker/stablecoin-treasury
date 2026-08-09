@@ -1,5 +1,6 @@
 import { ratesToEur, roundMoney } from "../../../packages/shared/data.mjs";
 import { httpError } from "../../../packages/shared/http.mjs";
+import { moneyNumber } from "../../../packages/shared/money.mjs";
 
 export function evaluate({ payment, wallet, wallets, asset, counterparty, provider }, policies) {
   if (!payment || !wallet || !asset || !counterparty || !provider) {
@@ -24,7 +25,7 @@ export function evaluate({ payment, wallet, wallets, asset, counterparty, provid
     },
     {
       label: "Balance",
-      status: wallet.balance >= payment.amount + payment.fee ? "Clear" : "Blocked",
+      status: moneyNumber(wallet.balance) >= roundMoney(moneyNumber(payment.amount) + moneyNumber(payment.fee)) ? "Clear" : "Blocked",
       detail: `${wallet.balance} ${payment.asset} available in source wallet`
     },
     {
@@ -99,7 +100,7 @@ export function requiredApprovalsFor(amountEur, policies) {
 }
 
 export function valueToEur(amount, asset) {
-  return Number(amount || 0) * (ratesToEur[asset] || 1);
+  return moneyNumber(amount || 0) * (ratesToEur[asset] || 1);
 }
 
 // Measures the largest single-asset share of total treasury value, before and after this
@@ -111,7 +112,7 @@ export function valueToEur(amount, asset) {
 // while leaving another asset's wallets untouched can concentrate the *remaining* book in
 // whatever wasn't spent, so we track the maximum share across all assets.
 export function assetConcentrationAfterPayment(wallets, payment) {
-  const outgoing = valueToEur(Number(payment.amount || 0) + Number(payment.fee || 0), payment.asset);
+  const outgoing = valueToEur(roundMoney(moneyNumber(payment.amount || 0) + moneyNumber(payment.fee || 0)), payment.asset);
   const valueByAsset = new Map();
   for (const item of wallets) {
     const value = valueToEur(item.balance, item.asset);

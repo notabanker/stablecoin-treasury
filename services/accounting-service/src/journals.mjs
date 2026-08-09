@@ -1,15 +1,24 @@
-import { createId, roundMoney } from "../../../packages/shared/data.mjs";
+import { createId } from "../../../packages/shared/data.mjs";
 import { httpError } from "../../../packages/shared/http.mjs";
+import { Money, moneyNumber, parseMoneyInput } from "../../../packages/shared/money.mjs";
 
 export function createPaymentJournals(payment, wallet, entity, asset) {
   const date = new Date().toISOString().slice(0, 10);
   const currency = asset?.currency || (payment.asset === "USDC" ? "USD" : "EUR");
-  const amount = Number(payment.amount);
-  const fee = Number(payment.fee || 0);
-  if (!Number.isFinite(amount) || amount <= 0 || !Number.isFinite(fee) || fee < 0) {
+  let amountMoney;
+  let feeMoney;
+  try {
+    amountMoney = parseMoneyInput(payment.amount);
+    feeMoney = parseMoneyInput(payment.fee || 0);
+  } catch {
     throw httpError(422, "Payment amount and fee must be valid numbers", "invalid_amount");
   }
-  const cashOut = roundMoney(amount + fee);
+  if (!amountMoney.isPositive() || feeMoney.isNegative()) {
+    throw httpError(422, "Payment amount and fee must be valid numbers", "invalid_amount");
+  }
+  const amount = amountMoney.toNumber();
+  const fee = feeMoney.toNumber();
+  const cashOut = amountMoney.plus(feeMoney).toNumber();
   return [
     {
       id: createId("je"),
@@ -48,8 +57,8 @@ export function createPaymentJournals(payment, wallet, entity, asset) {
 }
 
 export function assertBalanced(entries) {
-  const debit = roundMoney(entries.reduce((sum, entry) => sum + Number(entry.debit || 0), 0));
-  const credit = roundMoney(entries.reduce((sum, entry) => sum + Number(entry.credit || 0), 0));
+  const debit = entries.reduce((sum, entry) => sum.plus(Money.fromNumber(moneyNumber(entry.debit || 0))), Money.zero()).toNumber();
+  const credit = entries.reduce((sum, entry) => sum.plus(Money.fromNumber(moneyNumber(entry.credit || 0))), Money.zero()).toNumber();
   if (debit !== credit) {
     throw httpError(500, `Journal batch is unbalanced: debit ${debit}, credit ${credit}`, "unbalanced_journal");
   }

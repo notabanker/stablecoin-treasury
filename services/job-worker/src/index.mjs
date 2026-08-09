@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { verifyAuditChain } from "../../../packages/shared/audit.mjs";
 import { query } from "../../../packages/shared/db.mjs";
 import { claimJobs, completeJob, failJob } from "../../../packages/shared/jobs.mjs";
+import { moneyNumber } from "../../../packages/shared/money.mjs";
 import { serviceGet, servicePost } from "../../../packages/shared/service-client.mjs";
 import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
 import { resolveAdapter, withBreaker } from "../../../packages/shared/adapters/custody.mjs";
@@ -527,8 +528,8 @@ function fromPaymentRow(row) {
     sourceWalletId: row.source_wallet_id,
     counterpartyId: row.counterparty_id,
     asset: row.asset,
-    amount: Number(row.amount),
-    fee: Number(row.fee),
+    amount: moneyNumber(row.amount),
+    fee: moneyNumber(row.fee),
     status: row.status,
     approvals: row.approvals,
     requiredApprovals: row.required_approvals,

@@ -1,5 +1,6 @@
 import { query, withTransaction, runWithTenant } from "../../../packages/shared/db.mjs";
 import { createJsonService, httpError, ok, route } from "../../../packages/shared/http.mjs";
+import { moneyNumber, parseMoneyInput } from "../../../packages/shared/money.mjs";
 import { DEFAULT_TENANT_ID, tenantIdFromHeaders } from "../../../packages/shared/tenant.mjs";
 import { validateProductionConfig } from "../../../packages/shared/config.mjs";
 import { getOrCreateSharedAccount, getOrCreateWalletAccount, getWalletBalance, postTransaction } from "./ledger.mjs";
@@ -47,15 +48,21 @@ createJsonService({
       if (!idempotencyKey) {
         throw httpError(428, "Idempotency-Key is required for wallet debits", "idempotency_required");
       }
-      const principal = Number(body.principal ?? body.amount ?? 0);
-      const fee = Number(body.fee ?? 0);
-      if (!Number.isFinite(principal) || principal <= 0) {
+      let principal;
+      let fee;
+      try {
+        principal = parseMoneyInput(body.principal ?? body.amount ?? 0).toNumber();
+        fee = parseMoneyInput(body.fee ?? 0).toNumber();
+      } catch {
         throw httpError(422, "Debit principal must be positive", "invalid_amount");
       }
-      if (!Number.isFinite(fee) || fee < 0) {
+      if (!(principal > 0)) {
+        throw httpError(422, "Debit principal must be positive", "invalid_amount");
+      }
+      if (!(fee >= 0)) {
         throw httpError(422, "Debit fee must be a non-negative number", "invalid_amount");
       }
-      const total = principal + fee;
+      const total = moneyNumber(principal) + moneyNumber(fee);
 
       return withTransaction(DB, async (client) => {
         // Locking the wallet row is a proxy for locking "this wallet's balance": balance is now
@@ -153,7 +160,7 @@ function toWalletShape(row) {
     address: row.address,
     custody: row.custody,
     status: row.status,
-    balance: Number(row.balance)
+    balance: moneyNumber(row.balance)
   };
 }
 
