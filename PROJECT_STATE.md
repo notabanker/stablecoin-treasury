@@ -93,6 +93,15 @@ Verification: `npm run check`; **76 unit + 90 integration + 4 concurrency = 170 
 ```text
 Date: 2026-08-09
 Agent: Claude
+Task: 2026-08-09 audit-fixes plan — COMPLETE. Final whole-branch review + fixes + full-suite verification on final HEAD
+Files changed (final round): apps/web/js/views-payments.js (a7f875e — imports renderWalletTable/renderCounterpartyTable from views-wallets.js and renderRiskLane from views-ops.js; renderOverviewView threw ReferenceError on every post-login render, stuck on login screen — branch-introduced by the F0 main.js split); .github/workflows/ci.yml (f1ff023 — db:setup step before the invariants step, invariants DATABASE_URL pointed at treasury_dev; previously the step ran against the never-migrated postgres DB and failed every push); PROJECT_STATE.md (this entry)
+Tests run: npm run check exit 0 (known 0017 duplicate only); npm run test:all 179/179 (79 unit + 96 integration + 4 concurrency); smoke pass on fully booted dev stack (fix implementer); local CI-sequence proof: npm run db:setup + npm run invariants both exit 0
+Result: final whole-branch opus review found 2 blockers — (1) CRITICAL dashboard imports (above, three missing names — the parked F11 finding, worse than noted, branch-introduced by F0), (2) IMPORTANT CI invariants wiring (above). Both fixed and scoped re-reviewed CLEAN. All other final-review findings ruled optional/skip (recorded in .superpowers/sdd/2026-08-09-audit-fixes/progress.md): negative half-up asymmetry in money.mjs header, noHandler/deadLettered metric skew, webhook-processed-before-match ordering (brief-mandated, retry-recoverable), theoretical match-dedupe race. Plan range a258a6f..f1ff023 = 18 commits (F0–F13 + rag .gitignore + 2 final fixes). 0.1.4 and audit item M7 closed. Next per V8 task list: Epic 0.4 (config/auth/integrity hardening — 0.4.1/0.4.2 P0).
+```
+
+```text
+Date: 2026-08-09
+Agent: Claude
 Task: Task F13 (2026-08-09 audit-fixes) — close V8 0.1.4 (adversarial production reset test); docs only
 Files changed: docs/V8_TASK_LIST.md (0.1.4 ticked); PROJECT_STATE.md (BLOCKED block replaced with resolved status, Active References re-pointed at the audit-fixes plan); docs/superpowers/plans/2026-08-09-audit-fixes.md (untracked plan file added to the tree so the Active References pointer is now real)
 Tests run: node --test tests/integration/prod-reset.test.mjs 3/3 pass (incl. "POST /api/reset with explicit PRODUCTION_MODE=true returns 403 when ALLOW_DEMO_RESET is unset"); npm run check exit 0 (known 0017 duplicate only)
