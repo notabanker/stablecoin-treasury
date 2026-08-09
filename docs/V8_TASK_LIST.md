@@ -33,7 +33,7 @@ Companion to `docs/V8_IMPLEMENTATION_PLAN.md`. Task IDs are stable; dependencies
 - [x] **0.1.1** — `ALLOW_DEMO_RESET` gate on `POST /api/reset` (P0)
 - [x] **0.1.2** — Tenant-scoped reseeds (P0)
 - [x] **0.1.3** — `admin:reset` scope fix (P0) — kept on tenant Admin (approved 2026-07-12); formalized with regression coverage, no permission change
-- [ ] **0.1.4** — Adversarial production reset test (P0) — BLOCKED, see PROJECT_STATE.md session log for the exact unblocker options
+- [x] **0.1.4** — Adversarial production reset test (P0) — closed by a258a6f (TEST_HARNESS_PRODUCTION_MODE escape for prod-mode boots) + 2301d0c (adversarial test); verified 3/3 pass 2026-08-09
 
 ### Epic 0.2 — Outbox reliability
 

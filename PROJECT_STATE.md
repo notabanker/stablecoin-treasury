@@ -16,14 +16,15 @@ unknown tenants empty, identity/RBAC untouched, and no global payment-reference 
 already caller-tenant-scoped via 0.1.2, so no platform-operator role needed); formalized with two
 regression tests (symmetric tenant-1↔tenant-2 reset isolation, and an RBAC-surface bite test
 asserting admin:reset is granted to exactly {tenant-1 Admin, tenant-2 Admin}).
-**0.1.4 BLOCKED**: adversarial HTTP test needs a live gateway booted with `PRODUCTION_MODE=true`
-passing `validateProductionConfig` (packages/shared/config.mjs:29, hard synchronous throw at
-services/api-gateway/src/index.mjs:17), which requires a `DATABASE_URL` not containing
-"127.0.0.1"/"localhost"/"treasury_dev". Verified the IPv6-loopback workaround (`[::1]`, which the
-local Postgres server itself accepts) does NOT work: this project's `pg` connection-string parser
-fails on bracketed IPv6 (`getaddrinfo ENOTFOUND [::1]`) even though `pg.Client({host:"::1"})`
-with discrete fields works fine — see session log below for the three options. Needs Flo's
-decision before proceeding; not improvised. **Epic 0.2 done** (0.2.1–0.2.5, outbox DLQ / H3):
+**0.1.4 done** (adversarial production reset test): `PRODUCTION_MODE=true` gateway
+boots via the test-harness escape added in a258a6f (`TEST_HARNESS_PRODUCTION_MODE=true`
++ ephemeral `treasury_test_*` DB pass `validateProductionConfig`,
+packages/shared/config.mjs:44-50; tests/helpers/stack.mjs:112-124 auto-sets it with
+all production env requirements). Adversarial test at tests/integration/prod-reset.test.mjs:35-48
+asserts 403 `demo_reset_disabled` under `PRODUCTION_MODE=true` without
+`ALLOW_DEMO_RESET`; verified 3/3 pass 2026-08-09. The A/B/C unblocker options from
+the July session log are superseded — Flo confirmed 2026-08-09: skip Docker, the
+existing coverage satisfies the acceptance criterion. **Epic 0.2 done** (0.2.1–0.2.5, outbox DLQ / H3):
 dead-lettering + exponential backoff on `platform.outbox_events`, watchdog alert, poison-batch
 regression test. 0.2.6 (replay tool) deferred, P1. **Epic 0.3 done** (0.3.1–0.3.6,
 `provider_submissions` crash-safety, G1, Finding 1 — CRITICAL): closes the duplicate-external-
@@ -51,6 +52,7 @@ Phase 1 blocked on: Phase 0 exit + Doppler setup + Circle sandbox access.
 - `docs/V8_FINAL_PLAN.md` — authoritative summary (decisions + phases + next steps)
 - `docs/V8_IMPLEMENTATION_PLAN.md` — full epic/task specification
 - `docs/V8_TASK_LIST.md` — stable task IDs and checkboxes for V8
+- `docs/superpowers/plans/2026-08-09-audit-fixes.md` — **current execution plan** (audit fixes F0–F13, committed with this task)
 - `HANDOFF.md` — full-state catch-up for anyone joining (aggregates audit, completion report, lessons)
 - `docs/V6_JUDGE_INSTRUCTION.md` — prompt for an independent LLM to evaluate the work (blind verification, then grades the self-audit)
 - `README.md`
@@ -87,6 +89,17 @@ Quality hardening Q1–Q8 complete (see `docs/QUALITY_REMEDIATION_INSTRUCTION.md
 Verification: `npm run check`; **76 unit + 90 integration + 4 concurrency = 170 pass**.
 
 ## Session Log
+
+```text
+Date: 2026-08-09
+Agent: Claude
+Task: Task F13 (2026-08-09 audit-fixes) — close V8 0.1.4 (adversarial production reset test); docs only
+Files changed: docs/V8_TASK_LIST.md (0.1.4 ticked); PROJECT_STATE.md (BLOCKED block replaced with resolved status, Active References re-pointed at the audit-fixes plan); docs/superpowers/plans/2026-08-09-audit-fixes.md (untracked plan file added to the tree so the Active References pointer is now real)
+Tests run: node --test tests/integration/prod-reset.test.mjs 3/3 pass (incl. "POST /api/reset with explicit PRODUCTION_MODE=true returns 403 when ALLOW_DEMO_RESET is unset"); npm run check exit 0 (known 0017 duplicate only)
+Result: 0.1.4 closed with no code changes — the acceptance criterion is already met by existing coverage: 0.1.4 was unblocked pre-session by a258a6f's test-harness escape (TEST_HARNESS_PRODUCTION_MODE=true + ephemeral treasury_test_* DB pass validateProductionConfig at packages/shared/config.mjs:44-50; tests/helpers/stack.mjs:112-124 auto-sets it with every production env requirement), and the adversarial test was finalized by F0 (commit 2301d0c) at tests/integration/prod-reset.test.mjs:35-48, asserting 403 demo_reset_disabled under PRODUCTION_MODE=true without ALLOW_DEMO_RESET. Docker option (brief's A/B/C) skipped per Flo's 2026-08-09 decision — the existing coverage satisfies the acceptance criterion. Audit item M7 (last open item from AUDIT_V4) closes.
+Next step: audit-fixes plan F0–F13 complete; next per V8 task list is Epic 0.4 (config/auth/integrity hardening — 0.4.1/0.4.2 P0).
+Human decisions needed: none for F13.
+```
 
 ```text
 Date: 2026-08-09
