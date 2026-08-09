@@ -45,3 +45,8 @@ test("roundMoney delegates to cent-safe rounding", () => {
   assert.equal(roundMoney(1.006), 1.01);
   assert.equal(roundMoney(1.004), 1);
 });
+
+test("fromString rounds half-up at the 3rd decimal", () => {
+  assert.equal(Money.fromString("1.005").toNumber(), 1.01);
+  assert.equal(Money.fromString("1.004").toNumber(), 1.0);
+});

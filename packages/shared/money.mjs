@@ -8,7 +8,11 @@
 //   const total  = amount.plus(fee);               // €432.40
 //
 // All operations use BigInt internally, so precision is exact up to the cent.
-// Rounding (half-up) is explicit and localized to construction.
+// fromString/fromNumeric round half-up at the 3rd decimal digit on the exact
+// string (no float round-trip) — the 3rd digit alone decides, digits beyond it
+// truncate, so pg numerics of any magnitude (even past 2^53) stay exact.
+// fromNumber, times, and divide round-trip through Number: exact only within
+// the Number-safe integer ceiling (documented, not a known bug).
 
 const SCALE = 100n; // 2 decimal places → cents
 
@@ -32,7 +36,11 @@ export class Money {
     const clean = String(value).replace(/[,\s]/g, "");
     const parts = clean.split(".");
     const whole = BigInt(parts[0] || "0");
-    const frac = parts[1] ? BigInt(parts[1].padEnd(2, "0").slice(0, 2)) : 0n;
+    // Half-up round at the 3rd decimal digit. All math is string/BigInt, so a
+    // full-precision pg numeric string never round-trips through Number.
+    const frac3 = (parts[1] || "").padEnd(3, "0");
+    let frac = BigInt(frac3.slice(0, 2));
+    if (frac3[2] >= "5") frac += 1n; // carry (frac === 100n) folds into whole below
     const sign = whole < 0n || clean.startsWith("-") ? -1n : 1n;
     return new Money(sign * (abs(whole) * SCALE + frac));
   }
