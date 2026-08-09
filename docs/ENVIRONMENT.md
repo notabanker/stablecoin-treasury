@@ -147,3 +147,7 @@ Safe for `127.0.0.1` development:
 - `INTERNAL_AUTH_REQUIRED` defaults to off
 - `INTERNAL_SERVICE_TOKEN` defaults to `dev-internal-token`
 - Demo password: `demo123`
+
+## compliance-service
+
+- Counterparty screening is simulated: `/screen` returns the counterparty's seeded screening status; no external screening provider is connected.

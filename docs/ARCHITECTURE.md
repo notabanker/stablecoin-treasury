@@ -37,7 +37,7 @@ flowchart LR
 - `api-gateway`: serves the web app, composes `/api/state`, and exposes BFF commands for the browser.
 - `wallet-service`: owns legal entities, assets, wallets, balances, and debits.
 - `policy-service`: owns approval thresholds, asset allowlists, and payment policy evaluation.
-- `compliance-service`: owns counterparty records and screening results.
+- `compliance-service`: owns counterparty records; counterparty screening is simulated — `/screen` returns the counterparty's seeded screening status; no external screening provider is connected.
 - `payment-service`: owns payment lifecycle state and orchestrates execution across services.
 - `accounting-service`: owns journal entries and export status.
 - `reconciliation-service`: owns matching records and exceptions. Also ingests provider statements and matches them against internal payments (V6 Epic 5.2).
@@ -63,7 +63,7 @@ Row-level security policies are applied on all tenant-scoped tables in every sch
 - **`identity`** — `users`, `sessions`, `user_roles`, `pending_invites`
 - **`wallet`** — `legal_entities`, `assets`, `wallets`, `wallet_balances`, `ledger_accounts`, `ledger_transactions`, `ledger_entries`, `wallet_debit_reservations`
 - **`policy`** — `policies`, `asset_policies`, `approval_rules`
-- **`compliance`** — `counterparties`, `screening_results`
+- **`compliance`** — `counterparties`
 - **`payment`** — `payments`, `payment_events`, `payment_approvals`, `payment_attempts`
 - **`accounting`** — `journal_entries`, `journal_export_batches`
 - **`reconciliation`** — `reconciliation_rows`, `provider_statements`, `statement_lines`
