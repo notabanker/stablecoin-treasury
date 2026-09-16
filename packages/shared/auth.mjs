@@ -217,7 +217,7 @@ function timingSafeStringEqual(left, right) {
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
-export async function validateSession(token) {
+async function validateSession(token) {
   if (!token) return null;
   const { rows } = await query(
     DB,
