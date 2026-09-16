@@ -98,3 +98,30 @@ are preserved here.
   shared `tests/helpers/{api,db}.mjs`); concurrency suite unchanged in intent.
 - **Docs:** consolidated from ~13,800 lines across 50 files to a small accuracy-first set;
   stale phase/audit artifacts deleted with their outcomes recorded here.
+
+## 2026-09-16 — Independent review of the simplification PR
+
+- **SIMPLIFICATION_HANDOFF.md / docs/REVIEW_FOLLOWUP.md:** review brief for PR #2 and the
+  follow-up work order it produced. Both superseded by this entry; the review itself is
+  preserved on the pull request.
+- **Verified, not taken on trust:** every measured claim in the brief reproduces from the
+  branch — the diffstat, `db/migrations` untouched at zero lines, and each row of the LOC
+  table. Gated areas were genuinely untouched: `db.mjs`, `outbox.mjs`, `audit.mjs`,
+  `jobs.mjs` and `tenant.mjs` differ from the baseline by nothing but un-exports. Test-name
+  parity held at 177 names, and the assertion-count delta was fully accounted for.
+- **Honest reading of the LOC result:** 89% of the whole-repository reduction is prose.
+  Production logic fell ~16%, migrations and test coverage by design not at all.
+- **One regression found and fixed:** `GET /api/state` had been made degraded-tolerant with
+  no consumer for the `degraded` field, so a downstream outage rendered as an empty desk
+  rather than an error. The composer stays unified; the degradation is now visible in the UI
+  and pinned by `tests/integration/state-degraded.test.mjs`.
+- **Three follow-ups delivered:** `validateSession` un-exported (it had been claimed and not
+  done); `docs/ARCHITECTURE.md` corrected — it credited `log.mjs` with redaction it does not
+  perform, and still routed new services through `scripts/dev.mjs` / `service-client.mjs`
+  after both became derived from `packages/shared/services.mjs`; `table()` in
+  `apps/web/js/util.js` now escapes by default like its sibling helpers, with explicit
+  `{ html }` / `{ td }` raw hatches, rendered output snapshot-identical.
+- **Uncredited wins the review surfaced:** generating `/api/docs` from the route table fixed
+  real drift (the hand-maintained list was missing `GET /api/payments/:id/approvals`), and
+  `tests/unit/breaker.test.mjs` had been testing an inlined copy of the circuit breaker
+  rather than the real one.

@@ -16,8 +16,17 @@
 - Docs consolidated from ~13,800 lines to a small accuracy-first set; stale phase/audit
   artifacts removed with outcomes recorded in `docs/HISTORY.md`
 
+### Fixed
+- `GET /api/state` degradation is now visible: a downstream outage raises a banner in the web
+  UI naming the unreachable services instead of rendering as an empty desk
+- `table()` in `apps/web/js/util.js` escapes headers and string cells by default, matching its
+  sibling render helpers; markup cells use explicit `{ html }` / `{ td }` hatches
+- `docs/ARCHITECTURE.md` no longer claims `log.mjs` performs redaction, and points new-service
+  additions at the `packages/shared/services.mjs` manifest
+
 ### Removed
 - Dead `packages/shared/provider-adapter.mjs` (the real seam is `adapters/custody.mjs`)
+- `validateSession` from the `packages/shared/auth.mjs` public surface (internal to that module)
 
 ## 0.2.0 (2026-07-15)
 
