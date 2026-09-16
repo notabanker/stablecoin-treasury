@@ -74,9 +74,10 @@ event deduped in `platform.webhook_events` → settlement webhook drives the sag
 | `jobs.mjs` | Durable job queue (claim/complete/fail with attempts and backoff) |
 | `outbox.mjs` | Outbox event routes + inbox dedup helper |
 | `audit.mjs` | Tamper-evident hash-chain insert and verifier |
-| `metrics.mjs`, `log.mjs`, `rows.mjs` | Metrics registry, structured logging/redaction, row mappers |
+| `metrics.mjs`, `log.mjs`, `rows.mjs` | Metrics snapshot cache; structured JSON logging (no redaction — callers must not pass secrets into log fields); row mappers |
 | `config.mjs` | Production config gate, `isDemoResetAllowed()` |
 | `service-client.mjs` | Signed service-to-service HTTP with timeouts/retries |
+| `services.mjs` | Canonical service topology (name, path, port env var, port, DB role, URL env var); consumed by `scripts/dev.mjs`, `service-client.mjs` and `tests/helpers/stack.mjs` |
 | `adapters/custody.mjs` | Custody adapter interface, simulated provider, circuit breaker |
 
 ## Adding A Service Or Route
@@ -86,6 +87,8 @@ then expose it at the gateway with an auth/permission wrapper if browser-facing,
 view/action in `apps/web/js/views-*.js`. Add a regression test under `tests/integration/`.
 
 **New service:** copy the shape of an existing service (`src/index.mjs` built on
-`createDomainService`), own a new Postgres schema + migration, add its port to
-`scripts/dev.mjs` and `docker-compose.yml`, add its URL to `service-client.mjs` and
-`.env.example`, and give it explicit grants/RLS in a migration.
+`createDomainService`), own a new Postgres schema + migration with explicit grants/RLS, and
+append one row to `packages/shared/services.mjs` (name, path, port env var, port, DB role, and
+`urlEnv` if the gateway calls it over HTTP). `scripts/dev.mjs`, `service-client.mjs` and the
+test harness all derive from that single row. Also add the service to `docker-compose.yml` and
+`.env.example`.
