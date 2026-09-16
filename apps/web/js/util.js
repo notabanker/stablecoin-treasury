@@ -89,13 +89,16 @@ function emptyState(label) {
   return `<div class="empty-state">${escapeHtml(label)}</div>`;
 }
 
+// Escapes by default, like the sibling helpers. Headers and string cells are escaped; a cell
+// that must carry markup is passed as { html: "<strong>…</strong>" } (inserted inside a <td>)
+// or { td: "<td class=\"row-actions\">…</td>" } (inserted as the whole cell).
 function table(headers, rows, { className = "", rowAttributes = () => "" } = {}) {
   return `
     <div class="table-wrap${className ? ` ${className}` : ""}">
       <table>
         <thead>
           <tr>
-            ${headers.map((header) => `<th>${header}</th>`).join("\n")}
+            ${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("\n")}
           </tr>
         </thead>
         <tbody>
@@ -103,7 +106,7 @@ function table(headers, rows, { className = "", rowAttributes = () => "" } = {})
             const attributes = rowAttributes(index);
             return `
               <tr${attributes ? ` ${attributes}` : ""}>
-                ${cells.map((cell) => (cell.startsWith("<td") ? cell : `<td>${cell}</td>`)).join("\n")}
+                ${cells.map(tableCell).join("\n")}
               </tr>
             `;
           }).join("")}
@@ -111,6 +114,15 @@ function table(headers, rows, { className = "", rowAttributes = () => "" } = {})
       </table>
     </div>
   `;
+}
+
+function tableCell(cell) {
+  if (cell && typeof cell === "object") {
+    if (cell.td !== undefined) return cell.td;
+    if (cell.html !== undefined) return `<td>${cell.html}</td>`;
+    return "<td></td>";
+  }
+  return `<td>${escapeHtml(cell)}</td>`;
 }
 
 function panel({ kicker, title, titleHtml, actions = "", body = "", className = "", headerClass = "", tag = "section" } = {}) {

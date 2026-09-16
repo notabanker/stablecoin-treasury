@@ -118,13 +118,13 @@ function renderPaymentTable(payments, selectable) {
     payments.map((payment) => {
       const counterparty = findById(state.data.counterparties, payment.counterpartyId);
       return [
-        `<strong>${escapeHtml(payment.reference)}</strong><span class="muted-cell">${escapeHtml(formatDate(payment.createdAt))}</span>`,
-        escapeHtml(payment.type),
-        escapeHtml(counterparty?.name || payment.counterpartyId),
-        escapeHtml(token(payment.amount, payment.asset)),
-        badge(payment.screenResult),
-        badge(payment.status),
-        `<td class="row-actions">${renderPaymentActions(payment, true)}</td>`
+        { html: `<strong>${escapeHtml(payment.reference)}</strong><span class="muted-cell">${escapeHtml(formatDate(payment.createdAt))}</span>` },
+        payment.type,
+        counterparty?.name || payment.counterpartyId,
+        token(payment.amount, payment.asset),
+        { html: badge(payment.screenResult) },
+        { html: badge(payment.status) },
+        { td: `<td class="row-actions">${renderPaymentActions(payment, true)}</td>` }
       ];
     }),
     {

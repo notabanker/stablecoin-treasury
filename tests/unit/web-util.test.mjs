@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 // state.js reads document at module scope — stub the bare minimum before import.
 globalThis.document = { querySelector: () => ({ innerHTML: "", addEventListener: () => {} }) };
 
-const { computeMetrics, filteredPayments } = await import("../../apps/web/js/util.js");
+const { computeMetrics, filteredPayments, table } = await import("../../apps/web/js/util.js");
 const { state } = await import("../../apps/web/js/state.js");
 
 test("computeMetrics aggregates the dashboard cards", () => {
@@ -28,6 +28,19 @@ test("computeMetrics aggregates the dashboard cards", () => {
   assert.equal(m.readyJournals, 1);
   assert.equal(m.eurAssetShare, 0.25); // 100 / (100+300), EURC only
   assert.equal(m.totalEur, 400);
+});
+
+test("table escapes headers and string cells by default", () => {
+  const html = table(["A<header>"], [["<script>alert('xss')</script>"]]);
+  assert.match(html, /<th>A&lt;header&gt;<\/th>/);
+  assert.match(html, /<td>&lt;script&gt;alert\(&#39;xss&#39;\)&lt;\/script&gt;<\/td>/);
+  assert.doesNotMatch(html, /<script>alert/);
+});
+
+test("table inserts { html } and { td } cells raw", () => {
+  const html = table(["H"], [[{ html: "<strong>bold</strong>" }, { td: `<td class="row-actions">x</td>` }]]);
+  assert.match(html, /<td><strong>bold<\/strong><\/td>/);
+  assert.match(html, /<td class="row-actions">x<\/td>/);
 });
 
 test("filteredPayments filters by status and search text", () => {

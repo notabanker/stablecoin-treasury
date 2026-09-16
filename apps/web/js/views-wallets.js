@@ -26,12 +26,12 @@ function renderWalletTable(wallets, compact = false) {
     const entity = findById(state.data.entities, wallet.entityId);
     const provider = findById(state.data.providers, wallet.providerId);
     return [
-      `<strong>${escapeHtml(entity?.name || wallet.entityId)}</strong><span class="muted-cell">${escapeHtml(entity?.erpCode || "")}</span>`,
-      escapeHtml(wallet.asset),
-      escapeHtml(provider?.name || wallet.providerId),
-      ...(compact ? [] : [`<code>${escapeHtml(wallet.address)}</code>`]),
-      escapeHtml(token(wallet.balance, wallet.asset)),
-      badge(wallet.status)
+      { html: `<strong>${escapeHtml(entity?.name || wallet.entityId)}</strong><span class="muted-cell">${escapeHtml(entity?.erpCode || "")}</span>` },
+      wallet.asset,
+      provider?.name || wallet.providerId,
+      ...(compact ? [] : [{ html: `<code>${escapeHtml(wallet.address)}</code>` }]),
+      token(wallet.balance, wallet.asset),
+      { html: badge(wallet.status) }
     ];
   });
   return table(headers, rows, { className: compact ? "compact-table" : "" });
@@ -114,12 +114,12 @@ function renderCounterpartyTable(counterparties) {
   return table(
     ["Name", "Type", "Jurisdiction", "Asset", "Risk", "Status"],
     counterparties.map((counterparty) => [
-      `<strong>${escapeHtml(counterparty.name)}</strong><span class="muted-cell"><code>${escapeHtml(counterparty.wallet)}</code></span>`,
-      escapeHtml(counterparty.type),
-      escapeHtml(counterparty.jurisdiction),
-      escapeHtml(counterparty.asset),
-      badge(counterparty.risk),
-      badge(counterparty.status)
+      { html: `<strong>${escapeHtml(counterparty.name)}</strong><span class="muted-cell"><code>${escapeHtml(counterparty.wallet)}</code></span>` },
+      counterparty.type,
+      counterparty.jurisdiction,
+      counterparty.asset,
+      { html: badge(counterparty.risk) },
+      { html: badge(counterparty.status) }
     ])
   );
 }

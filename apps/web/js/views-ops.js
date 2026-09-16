@@ -31,12 +31,12 @@ function renderRepairTable(items) {
         const payment = item.payment;
         const last = latestAttempt(item);
         return [
-          `<strong>${escapeHtml(payment.reference)}</strong><span class="muted-cell">${escapeHtml(formatDate(payment.createdAt))}</span>`,
-          badge(payment.status),
-          escapeHtml(token(payment.amount, payment.asset)),
-          escapeHtml(String(item.attempts.length)),
-          `<strong>${escapeHtml(last?.step || "-")}</strong><span class="muted-cell">${escapeHtml(last?.error || last?.outcome || "No attempt recorded")}</span>`,
-          `<td class="row-actions">${button("Retry", "retry-execution", payment.id, "primary")}</td>`
+          { html: `<strong>${escapeHtml(payment.reference)}</strong><span class="muted-cell">${escapeHtml(formatDate(payment.createdAt))}</span>` },
+          { html: badge(payment.status) },
+          token(payment.amount, payment.asset),
+          String(item.attempts.length),
+          { html: `<strong>${escapeHtml(last?.step || "-")}</strong><span class="muted-cell">${escapeHtml(last?.error || last?.outcome || "No attempt recorded")}</span>` },
+          { td: `<td class="row-actions">${button("Retry", "retry-execution", payment.id, "primary")}</td>` }
         ];
       })
     )}
@@ -88,13 +88,13 @@ function renderReconciliationTable(rows) {
     rows.map((row) => {
       const payment = findById(state.data.payments, row.paymentId);
       return [
-        `<strong>${escapeHtml(payment?.reference || row.paymentId)}</strong><span class="muted-cell">${escapeHtml(`${row.ageHours}h`)}</span>`,
-        escapeHtml(row.source),
-        escapeHtml(row.issue),
-        escapeHtml(token(row.amount, row.asset)),
-        escapeHtml(row.owner),
-        badge(row.status),
-        `<td class="row-actions">${row.status === "Open" ? button("Resolve", "resolve-recon", row.id, "secondary") : ""}</td>`
+        { html: `<strong>${escapeHtml(payment?.reference || row.paymentId)}</strong><span class="muted-cell">${escapeHtml(`${row.ageHours}h`)}</span>` },
+        row.source,
+        row.issue,
+        token(row.amount, row.asset),
+        row.owner,
+        { html: badge(row.status) },
+        { td: `<td class="row-actions">${row.status === "Open" ? button("Resolve", "resolve-recon", row.id, "secondary") : ""}</td>` }
       ];
     })
   );
@@ -108,13 +108,13 @@ function renderJournalTable(rows) {
       const entity = findById(state.data.entities, row.entityId);
       const payment = findById(state.data.payments, row.paymentId);
       return [
-        escapeHtml(row.date),
-        escapeHtml(entity?.erpCode || row.entityId),
-        escapeHtml(payment?.reference || row.paymentId),
-        escapeHtml(row.account),
-        escapeHtml(row.debit ? money(row.debit, row.currency) : "-"),
-        escapeHtml(row.credit ? money(row.credit, row.currency) : "-"),
-        badge(row.status)
+        row.date,
+        entity?.erpCode || row.entityId,
+        payment?.reference || row.paymentId,
+        row.account,
+        row.debit ? money(row.debit, row.currency) : "-",
+        row.credit ? money(row.credit, row.currency) : "-",
+        { html: badge(row.status) }
       ];
     })
   );
