@@ -1,7 +1,7 @@
 import { state } from "./state.js";
 import {
-  badge, button, detail, emptyState, findById, formatDate, formatDateTime,
-  metricCard, money, option, pill, rule, token, walletValueEur,
+  badge, button, detail, emptyState, findById, formatDate,
+  metricCard, money, option, panel, pill, table, token,
   computeMetrics, filteredPayments, escapeHtml
 } from "./util.js";
 import { renderCounterpartyTable, renderWalletTable } from "./views-wallets.js";
@@ -20,37 +20,18 @@ function renderOverviewView() {
     </section>
 
     <section class="split-grid wide-first">
-      <div class="panel">
-        <div class="panel-header">
-          <div>
-            <div class="section-kicker">Liquidity</div>
-            <h2>Wallet coverage</h2>
-          </div>
-          ${pill(`${Math.round(metrics.eurAssetShare * 100)}% EUR exposure`, metrics.eurAssetShare > 0.5 ? "clear" : "warning")}
-        </div>
-        ${renderWalletTable(data.wallets.slice(0, 6), true)}
-      </div>
-      <div class="panel">
-        <div class="panel-header">
-          <div>
-            <div class="section-kicker">Risk lane</div>
-            <h2>Open work</h2>
-          </div>
-        </div>
-        ${renderRiskLane()}
-      </div>
+      ${panel({
+        tag: "div", kicker: "Liquidity", title: "Wallet coverage",
+        actions: pill(`${Math.round(metrics.eurAssetShare * 100)}% EUR exposure`, metrics.eurAssetShare > 0.5 ? "clear" : "warning"),
+        body: renderWalletTable(data.wallets.slice(0, 6), true)
+      })}
+      ${panel({ tag: "div", kicker: "Risk lane", title: "Open work", body: renderRiskLane() })}
     </section>
 
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <div class="section-kicker">Payment rail</div>
-          <h2>Recent movements</h2>
-        </div>
-        ${button("View payments", "navigate", "payments", "secondary")}
-      </div>
-      ${renderPaymentTable(data.payments.slice(0, 5), false)}
-    </section>
+    ${panel({
+      kicker: "Payment rail", title: "Recent movements", actions: button("View payments", "navigate", "payments", "secondary"),
+      body: renderPaymentTable(data.payments.slice(0, 5), false)
+    })}
   `;
 }
 
@@ -60,12 +41,9 @@ function renderPaymentsView() {
   const selected = data.payments.find((payment) => payment.id === state.selectedPaymentId) || data.payments[0];
   return `
     ${state.showPaymentForm ? renderPaymentForm() : ""}
-    <section class="panel">
-      <div class="panel-header command-header">
-        <div>
-          <div class="section-kicker">Payment operations</div>
-          <h2>Queue</h2>
-        </div>
+    ${panel({
+      kicker: "Payment operations", title: "Queue", headerClass: "command-header",
+      actions: `
         <form class="filter-form" data-form="payment-filter">
           <input name="paymentSearch" type="search" value="${escapeHtml(state.filters.paymentSearch)}" aria-label="Search payments">
           <select name="paymentStatus" aria-label="Payment status">
@@ -73,44 +51,26 @@ function renderPaymentsView() {
           </select>
           <button class="btn secondary" type="submit">Filter</button>
         </form>
-      </div>
-      ${renderPaymentTable(payments, true)}
-    </section>
+      `,
+      body: renderPaymentTable(payments, true)
+    })}
     <section class="split-grid">
-      <div class="panel">
-        <div class="panel-header">
-          <div>
-            <div class="section-kicker">Selected payment</div>
-            <h2>${escapeHtml(selected?.reference || "None")}</h2>
-          </div>
-          ${selected ? badge(selected.status) : ""}
-        </div>
-        ${selected ? renderPaymentDetail(selected) : emptyState("No payment selected")}
-      </div>
-      <div class="panel">
-        <div class="panel-header">
-          <div>
-            <div class="section-kicker">Counterparties</div>
-            <h2>Screening status</h2>
-          </div>
-        </div>
-        ${renderCounterpartyTable(data.counterparties)}
-      </div>
+      ${panel({
+        tag: "div", kicker: "Selected payment", title: selected?.reference || "None",
+        actions: selected ? badge(selected.status) : "",
+        body: selected ? renderPaymentDetail(selected) : emptyState("No payment selected")
+      })}
+      ${panel({ tag: "div", kicker: "Counterparties", title: "Screening status", body: renderCounterpartyTable(data.counterparties) })}
     </section>
   `;
 }
 
 function renderPaymentForm() {
   const data = state.data;
-  return `
-    <section class="panel command-panel">
-      <div class="panel-header">
-        <div>
-          <div class="section-kicker">Payment order</div>
-          <h2>New transfer</h2>
-        </div>
-        ${button("Close", "close-payment-form", "", "ghost")}
-      </div>
+  return panel({
+    className: "command-panel", kicker: "Payment order", title: "New transfer",
+    actions: button("Close", "close-payment-form", "", "ghost"),
+    body: `
       <form class="form-grid" data-form="create-payment">
         <label>
           <span>Source wallet</span>
@@ -147,46 +107,32 @@ function renderPaymentForm() {
           <button class="btn primary" type="submit" ${state.busy ? "disabled" : ""}>Create payment</button>
         </div>
       </form>
-    </section>
-  `;
+    `
+  });
 }
 
 function renderPaymentTable(payments, selectable) {
   if (!payments.length) return emptyState("No payments");
-  return `
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Reference</th>
-            <th>Type</th>
-            <th>Counterparty</th>
-            <th>Amount</th>
-            <th>Screen</th>
-            <th>Status</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          ${payments.map((payment) => {
-            const counterparty = findById(state.data.counterparties, payment.counterpartyId);
-            const rowAction = selectable ? `data-action="select-payment" data-id="${escapeHtml(payment.id)}"` : "";
-            return `
-              <tr ${rowAction}>
-                <td><strong>${escapeHtml(payment.reference)}</strong><span class="muted-cell">${escapeHtml(formatDate(payment.createdAt))}</span></td>
-                <td>${escapeHtml(payment.type)}</td>
-                <td>${escapeHtml(counterparty?.name || payment.counterpartyId)}</td>
-                <td>${escapeHtml(token(payment.amount, payment.asset))}</td>
-                <td>${badge(payment.screenResult)}</td>
-                <td>${badge(payment.status)}</td>
-                <td class="row-actions">${renderPaymentActions(payment, true)}</td>
-              </tr>
-            `;
-          }).join("")}
-        </tbody>
-      </table>
-    </div>
-  `;
+  return table(
+    ["Reference", "Type", "Counterparty", "Amount", "Screen", "Status", ""],
+    payments.map((payment) => {
+      const counterparty = findById(state.data.counterparties, payment.counterpartyId);
+      return [
+        `<strong>${escapeHtml(payment.reference)}</strong><span class="muted-cell">${escapeHtml(formatDate(payment.createdAt))}</span>`,
+        escapeHtml(payment.type),
+        escapeHtml(counterparty?.name || payment.counterpartyId),
+        escapeHtml(token(payment.amount, payment.asset)),
+        badge(payment.screenResult),
+        badge(payment.status),
+        `<td class="row-actions">${renderPaymentActions(payment, true)}</td>`
+      ];
+    }),
+    {
+      rowAttributes: (index) => (selectable
+        ? `data-action="select-payment" data-id="${escapeHtml(payments[index].id)}"`
+        : " ")
+    }
+  );
 }
 
 function renderApprovalsList(payment) {

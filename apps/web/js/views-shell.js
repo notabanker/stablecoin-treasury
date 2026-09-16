@@ -1,9 +1,5 @@
 import { state, views, appEl } from "./state.js";
-import {
-  badge, button, findById, formatDate, formatDateTime,
-  metricCard, money, pill, rule, shortTenant, token, walletValueEur,
-  escapeHtml
-} from "./util.js";
+import { button, formatDateTime, pill, shortTenant, escapeHtml } from "./util.js";
 import { renderToast } from "./api.js";
 import { renderOverviewView, renderPaymentsView } from "./views-payments.js";
 import { renderWalletsView, renderControlsView } from "./views-wallets.js";
@@ -164,14 +160,17 @@ function viewTitle() {
   return views.find(([id]) => id === state.activeView)?.[1] || "Overview";
 }
 
+const viewRenderers = {
+  payments: renderPaymentsView,
+  wallets: renderWalletsView,
+  controls: renderControlsView,
+  repair: renderRepairView,
+  reconciliation: renderReconciliationView,
+  operations: renderOperationsView
+};
+
 function renderActiveView() {
-  if (state.activeView === "payments") return renderPaymentsView();
-  if (state.activeView === "wallets") return renderWalletsView();
-  if (state.activeView === "controls") return renderControlsView();
-  if (state.activeView === "repair") return renderRepairView();
-  if (state.activeView === "reconciliation") return renderReconciliationView();
-  if (state.activeView === "operations") return renderOperationsView();
-  return renderOverviewView();
+  return (viewRenderers[state.activeView] || renderOverviewView)();
 }
 
 export {

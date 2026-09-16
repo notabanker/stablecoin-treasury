@@ -1,8 +1,7 @@
 import { state } from "./state.js";
 import {
-  badge, button, findById, formatDate, formatDateTime,
-  metricCard, money, rule, token, walletValueEur,
-  escapeHtml
+  badge, escapeHtml, findById, listCard, metricCard,
+  money, panel, rule, table, token, walletValueEur
 } from "./util.js";
 
 function renderWalletsView() {
@@ -12,114 +11,44 @@ function renderWalletsView() {
       ${assetCards().join("")}
     </section>
     <section class="split-grid wide-first">
-      <div class="panel">
-        <div class="panel-header">
-          <div>
-            <div class="section-kicker">Wallet registry</div>
-            <h2>Balances</h2>
-          </div>
-        </div>
-        ${renderWalletTable(data.wallets)}
-      </div>
-      <div class="panel">
-        <div class="panel-header">
-          <div>
-            <div class="section-kicker">Asset controls</div>
-            <h2>Allowlist</h2>
-          </div>
-        </div>
-        <div class="asset-list">
-          ${data.assets.map((asset) => renderAssetPolicy(asset)).join("")}
-        </div>
-      </div>
+      ${panel({ tag: "div", kicker: "Wallet registry", title: "Balances", body: renderWalletTable(data.wallets) })}
+      ${panel({
+        tag: "div", kicker: "Asset controls", title: "Allowlist",
+        body: `<div class="asset-list">${data.assets.map((asset) => renderAssetPolicy(asset)).join("")}</div>`
+      })}
     </section>
   `;
 }
 
 function renderWalletTable(wallets, compact = false) {
-  if (compact) {
-    return `
-      <div class="table-wrap compact-table">
-        <table>
-          <thead>
-            <tr>
-              <th>Entity</th>
-              <th>Asset</th>
-              <th>Provider</th>
-              <th>Balance</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${wallets.map((wallet) => {
-              const entity = findById(state.data.entities, wallet.entityId);
-              const provider = findById(state.data.providers, wallet.providerId);
-              return `
-                <tr>
-                  <td><strong>${escapeHtml(entity?.name || wallet.entityId)}</strong><span class="muted-cell">${escapeHtml(entity?.erpCode || "")}</span></td>
-                  <td>${escapeHtml(wallet.asset)}</td>
-                  <td>${escapeHtml(provider?.name || wallet.providerId)}</td>
-                  <td>${escapeHtml(token(wallet.balance, wallet.asset))}</td>
-                  <td>${badge(wallet.status)}</td>
-                </tr>
-              `;
-            }).join("")}
-          </tbody>
-        </table>
-      </div>
-    `;
-  }
-  return `
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Entity</th>
-            <th>Asset</th>
-            <th>Provider</th>
-            <th>Address</th>
-            <th>Balance</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${wallets.map((wallet) => {
-            const entity = findById(state.data.entities, wallet.entityId);
-            const provider = findById(state.data.providers, wallet.providerId);
-            return `
-              <tr>
-                <td><strong>${escapeHtml(entity?.name || wallet.entityId)}</strong><span class="muted-cell">${escapeHtml(entity?.erpCode || "")}</span></td>
-                <td>${escapeHtml(wallet.asset)}</td>
-                <td>${escapeHtml(provider?.name || wallet.providerId)}</td>
-                <td><code>${escapeHtml(wallet.address)}</code></td>
-                <td>${escapeHtml(token(wallet.balance, wallet.asset))}</td>
-                <td>${badge(wallet.status)}</td>
-              </tr>
-            `;
-          }).join("")}
-        </tbody>
-      </table>
-    </div>
-  `;
+  const headers = ["Entity", "Asset", "Provider", ...(compact ? [] : ["Address"]), "Balance", "Status"];
+  const rows = wallets.map((wallet) => {
+    const entity = findById(state.data.entities, wallet.entityId);
+    const provider = findById(state.data.providers, wallet.providerId);
+    return [
+      `<strong>${escapeHtml(entity?.name || wallet.entityId)}</strong><span class="muted-cell">${escapeHtml(entity?.erpCode || "")}</span>`,
+      escapeHtml(wallet.asset),
+      escapeHtml(provider?.name || wallet.providerId),
+      ...(compact ? [] : [`<code>${escapeHtml(wallet.address)}</code>`]),
+      escapeHtml(token(wallet.balance, wallet.asset)),
+      badge(wallet.status)
+    ];
+  });
+  return table(headers, rows, { className: compact ? "compact-table" : "" });
 }
 
 function renderAssetPolicy(asset) {
   const enabled = state.data.policies.allowedAssets.includes(asset.id);
   const provider = findById(state.data.providers, asset.providerId);
-  return `
-    <article class="list-card">
-      <div>
-        <div class="card-title">${escapeHtml(asset.id)} - ${escapeHtml(asset.name)}</div>
-        <div class="card-subtitle">${escapeHtml(asset.issuer)} / ${escapeHtml(asset.chain)} / ${escapeHtml(provider?.name || asset.providerId)}</div>
-      </div>
-      <div class="card-actions">
-        ${badge(asset.status)}
-        <button class="toggle ${enabled ? "is-on" : ""}" type="button" data-action="toggle-asset" data-id="${escapeHtml(asset.id)}" data-enabled="${enabled}">
-          <span>${enabled ? "Allowed" : "Blocked"}</span>
-        </button>
-      </div>
-    </article>
+  const trailing = `
+    <div class="card-actions">
+      ${badge(asset.status)}
+      <button class="toggle ${enabled ? "is-on" : ""}" type="button" data-action="toggle-asset" data-id="${escapeHtml(asset.id)}" data-enabled="${enabled}">
+        <span>${enabled ? "Allowed" : "Blocked"}</span>
+      </button>
+    </div>
   `;
+  return listCard(`${asset.id} - ${asset.name}`, `${asset.issuer} / ${asset.chain} / ${provider?.name || asset.providerId}`, trailing);
 }
 
 function assetCards() {
@@ -139,91 +68,60 @@ function renderControlsView() {
   const policies = data.policies;
   return `
     <section class="split-grid">
-      <div class="panel">
-        <div class="panel-header">
-          <div>
-            <div class="section-kicker">Policy engine</div>
-            <h2>Thresholds</h2>
+      ${panel({
+        tag: "div", kicker: "Policy engine", title: "Thresholds",
+        body: `
+          <form class="form-grid" data-form="policy">
+            <label>
+              <span>Approval threshold</span>
+              <input name="approvalThreshold" type="number" min="0" step="1000" value="${escapeHtml(policies.approvalThreshold)}">
+            </label>
+            <label>
+              <span>Second approval</span>
+              <input name="secondApprovalThreshold" type="number" min="0" step="1000" value="${escapeHtml(policies.secondApprovalThreshold)}">
+            </label>
+            <label>
+              <span>Hard transfer limit</span>
+              <input name="hardTransferLimit" type="number" min="0" step="1000" value="${escapeHtml(policies.hardTransferLimit)}">
+            </label>
+            <label>
+              <span>Concentration limit</span>
+              <input name="concentrationLimit" type="number" min="0" max="1" step="0.01" value="${escapeHtml(policies.concentrationLimit)}">
+            </label>
+            <div class="form-actions span-2">
+              <button class="btn primary" type="submit" ${state.busy ? "disabled" : ""}>Save thresholds</button>
+            </div>
+          </form>
+        `
+      })}
+      ${panel({
+        tag: "div", kicker: "Rules", title: "Active guardrails",
+        body: `
+          <div class="rule-list">
+            ${rule("Screening", policies.requireScreening ? "Required" : "Disabled", policies.requireScreening ? "clear" : "warning")}
+            ${rule("Allowed assets", policies.allowedAssets.join(", "), "clear")}
+            ${rule("Allowed providers", String(policies.allowedProviders.length), "clear")}
+            ${rule("Hard cap", money(policies.hardTransferLimit, "EUR"), "ready")}
           </div>
-        </div>
-        <form class="form-grid" data-form="policy">
-          <label>
-            <span>Approval threshold</span>
-            <input name="approvalThreshold" type="number" min="0" step="1000" value="${escapeHtml(policies.approvalThreshold)}">
-          </label>
-          <label>
-            <span>Second approval</span>
-            <input name="secondApprovalThreshold" type="number" min="0" step="1000" value="${escapeHtml(policies.secondApprovalThreshold)}">
-          </label>
-          <label>
-            <span>Hard transfer limit</span>
-            <input name="hardTransferLimit" type="number" min="0" step="1000" value="${escapeHtml(policies.hardTransferLimit)}">
-          </label>
-          <label>
-            <span>Concentration limit</span>
-            <input name="concentrationLimit" type="number" min="0" max="1" step="0.01" value="${escapeHtml(policies.concentrationLimit)}">
-          </label>
-          <div class="form-actions span-2">
-            <button class="btn primary" type="submit" ${state.busy ? "disabled" : ""}>Save thresholds</button>
-          </div>
-        </form>
-      </div>
-      <div class="panel">
-        <div class="panel-header">
-          <div>
-            <div class="section-kicker">Rules</div>
-            <h2>Active guardrails</h2>
-          </div>
-        </div>
-        <div class="rule-list">
-          ${rule("Screening", policies.requireScreening ? "Required" : "Disabled", policies.requireScreening ? "clear" : "warning")}
-          ${rule("Allowed assets", policies.allowedAssets.join(", "), "clear")}
-          ${rule("Allowed providers", String(policies.allowedProviders.length), "clear")}
-          ${rule("Hard cap", money(policies.hardTransferLimit, "EUR"), "ready")}
-        </div>
-      </div>
+        `
+      })}
     </section>
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <div class="section-kicker">Compliance registry</div>
-          <h2>Counterparties</h2>
-        </div>
-      </div>
-      ${renderCounterpartyTable(data.counterparties)}
-    </section>
+    ${panel({ kicker: "Compliance registry", title: "Counterparties", body: renderCounterpartyTable(data.counterparties) })}
   `;
 }
 
 function renderCounterpartyTable(counterparties) {
-  return `
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Type</th>
-            <th>Jurisdiction</th>
-            <th>Asset</th>
-            <th>Risk</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${counterparties.map((counterparty) => `
-            <tr>
-              <td><strong>${escapeHtml(counterparty.name)}</strong><span class="muted-cell"><code>${escapeHtml(counterparty.wallet)}</code></span></td>
-              <td>${escapeHtml(counterparty.type)}</td>
-              <td>${escapeHtml(counterparty.jurisdiction)}</td>
-              <td>${escapeHtml(counterparty.asset)}</td>
-              <td>${badge(counterparty.risk)}</td>
-              <td>${badge(counterparty.status)}</td>
-            </tr>
-          `).join("")}
-        </tbody>
-      </table>
-    </div>
-  `;
+  return table(
+    ["Name", "Type", "Jurisdiction", "Asset", "Risk", "Status"],
+    counterparties.map((counterparty) => [
+      `<strong>${escapeHtml(counterparty.name)}</strong><span class="muted-cell"><code>${escapeHtml(counterparty.wallet)}</code></span>`,
+      escapeHtml(counterparty.type),
+      escapeHtml(counterparty.jurisdiction),
+      escapeHtml(counterparty.asset),
+      badge(counterparty.risk),
+      badge(counterparty.status)
+    ])
+  );
 }
 
 export {

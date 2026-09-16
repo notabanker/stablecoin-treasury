@@ -16,47 +16,17 @@ function bindEvents() {
     if (!target || target.disabled) return;
     const action = target.dataset.action;
     const id = target.dataset.id || "";
-
-    if (action === "navigate") {
-      state.activeView = id;
-      state.showPaymentForm = false;
-      render();
-      return;
-    }
-
-    if (action === "refresh") {
-      await loadState("Refreshing desk");
-      return;
-    }
-
-    if (action === "logout") {
-      await logout();
-      return;
-    }
-
-    if (action === "new-payment") {
-      state.showPaymentForm = true;
-      state.activeView = "payments";
-      render();
-      return;
-    }
-
-    if (action === "close-payment-form") {
-      state.showPaymentForm = false;
-      render();
-      return;
-    }
-
-    if (action === "select-payment") {
-      state.selectedPaymentId = id;
-      state.activeView = "payments";
-      await loadPaymentApprovals(id);
-      render();
-      return;
-    }
-
-    const mutations = {
-      "approve-payment": () => post(`/payments/${id}/approve`, {}, "Payment approved"),
+    const actions = {
+      navigate: () => { state.activeView = id; state.showPaymentForm = false; render(); },
+      refresh: () => loadState("Refreshing desk"),
+      logout: () => logout(),
+      "new-payment": () => { state.showPaymentForm = true; state.activeView = "payments"; render(); },
+      "close-payment-form": () => { state.showPaymentForm = false; render(); },
+      "select-payment": async () => { state.selectedPaymentId = id; state.activeView = "payments"; await loadPaymentApprovals(id); render(); },
+      "approve-payment": async () => {
+        await post(`/payments/${id}/approve`, {}, "Payment approved");
+        if (state.selectedPaymentId) { await loadPaymentApprovals(state.selectedPaymentId); render(); }
+      },
       "cancel-payment": () => post(`/payments/${id}/cancel`, {}, "Payment cancelled"),
       "execute-payment": () => post(`/payments/${id}/execute`, {}, "Payment executed"),
       "retry-execution": () => post(`/repair/${id}/retry`, {}, "Execution retried"),
@@ -64,22 +34,10 @@ function bindEvents() {
       "simulate-recon": () => post("/reconciliation/exceptions/simulate", {}, "Exception created"),
       "export-accounting": () => post("/accounting/export", {}, "Journal batch exported"),
       "toggle-provider": () => post(`/operations/providers/${id}/toggle`, {}, "Provider status updated"),
-      "simulate-incident": () => post("/operations/incidents/simulate", {}, "Incident opened")
+      "simulate-incident": () => post("/operations/incidents/simulate", {}, "Incident opened"),
+      "toggle-asset": () => post(`/policies/assets/${id}`, { enabled: target.dataset.enabled !== "true" }, "Asset policy updated")
     };
-
-    if (action === "toggle-asset") {
-      const enabled = target.dataset.enabled === "true";
-      await post(`/policies/assets/${id}`, { enabled: !enabled }, "Asset policy updated");
-      return;
-    }
-
-    if (mutations[action]) {
-      await mutations[action]();
-      if (action === "approve-payment" && state.selectedPaymentId) {
-        await loadPaymentApprovals(state.selectedPaymentId);
-        render();
-      }
-    }
+    if (actions[action]) await actions[action]();
   });
 
   document.addEventListener("submit", async (event) => {

@@ -89,6 +89,57 @@ function emptyState(label) {
   return `<div class="empty-state">${escapeHtml(label)}</div>`;
 }
 
+function table(headers, rows, { className = "", rowAttributes = () => "" } = {}) {
+  return `
+    <div class="table-wrap${className ? ` ${className}` : ""}">
+      <table>
+        <thead>
+          <tr>
+            ${headers.map((header) => `<th>${header}</th>`).join("\n")}
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((cells, index) => {
+            const attributes = rowAttributes(index);
+            return `
+              <tr${attributes ? ` ${attributes}` : ""}>
+                ${cells.map((cell) => (cell.startsWith("<td") ? cell : `<td>${cell}</td>`)).join("\n")}
+              </tr>
+            `;
+          }).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function panel({ kicker, title, titleHtml, actions = "", body = "", className = "", headerClass = "", tag = "section" } = {}) {
+  return `
+    <${tag} class="panel${className ? ` ${className}` : ""}">
+      <div class="panel-header${headerClass ? ` ${headerClass}` : ""}">
+        <div>
+          <div class="section-kicker">${escapeHtml(kicker)}</div>
+          <h2>${titleHtml === undefined ? escapeHtml(title) : titleHtml}</h2>
+        </div>
+        ${actions}
+      </div>
+      ${body}
+    </${tag}>
+  `;
+}
+
+function listCard(title, subtitle, trailing = "") {
+  return `
+    <article class="list-card">
+      <div>
+        <div class="card-title">${escapeHtml(title)}</div>
+        <div class="card-subtitle">${escapeHtml(subtitle)}</div>
+      </div>
+      ${trailing}
+    </article>
+  `;
+}
+
 function walletValueEur(wallet) {
   const rates = state.data?.ratesToEur || {};
   return Number(wallet.balance || 0) * (rates[wallet.asset] || 1);
@@ -162,6 +213,9 @@ export {
   badge,
   pill,
   emptyState,
+  table,
+  panel,
+  listCard,
   walletValueEur,
   token,
   money,

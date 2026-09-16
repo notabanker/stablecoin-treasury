@@ -1,8 +1,8 @@
 import { state } from "./state.js";
 import {
-  badge, button, detail, emptyState, findById, formatDate, formatDateTime,
-  metricCard, money, rule, token, walletValueEur,
-  escapeHtml
+  badge, button, detail, emptyState, findById, formatDate,
+  formatDateTime, listCard, metricCard, money, panel, table,
+  token, escapeHtml
 } from "./util.js";
 
 function renderRepairView() {
@@ -15,52 +15,31 @@ function renderRepairView() {
       ${metricCard("Errors", String(repairItems.filter((item) => latestAttempt(item)?.error).length), "Latest attempt")}
       ${metricCard("Retries", String(repairItems.reduce((sum, item) => sum + item.attempts.filter((attempt) => attempt.outcome === "error").length, 0)), "Recorded failures")}
     </section>
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <div class="section-kicker">Operator repair</div>
-          <h2>Queue</h2>
-        </div>
-        ${button("Refresh", "refresh", "", "secondary")}
-      </div>
-      ${renderRepairTable(repairItems)}
-    </section>
+    ${panel({
+      kicker: "Operator repair", title: "Queue", actions: button("Refresh", "refresh", "", "secondary"),
+      body: renderRepairTable(repairItems)
+    })}
   `;
 }
 
 function renderRepairTable(items) {
   if (!items.length) return emptyState("No repairable payments");
   return `
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Payment</th>
-            <th>Status</th>
-            <th>Amount</th>
-            <th>Attempts</th>
-            <th>Last signal</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          ${items.map((item) => {
-            const payment = item.payment;
-            const last = latestAttempt(item);
-            return `
-              <tr>
-                <td><strong>${escapeHtml(payment.reference)}</strong><span class="muted-cell">${escapeHtml(formatDate(payment.createdAt))}</span></td>
-                <td>${badge(payment.status)}</td>
-                <td>${escapeHtml(token(payment.amount, payment.asset))}</td>
-                <td>${escapeHtml(String(item.attempts.length))}</td>
-                <td><strong>${escapeHtml(last?.step || "-")}</strong><span class="muted-cell">${escapeHtml(last?.error || last?.outcome || "No attempt recorded")}</span></td>
-                <td class="row-actions">${button("Retry", "retry-execution", payment.id, "primary")}</td>
-              </tr>
-            `;
-          }).join("")}
-        </tbody>
-      </table>
-    </div>
+    ${table(
+      ["Payment", "Status", "Amount", "Attempts", "Last signal", ""],
+      items.map((item) => {
+        const payment = item.payment;
+        const last = latestAttempt(item);
+        return [
+          `<strong>${escapeHtml(payment.reference)}</strong><span class="muted-cell">${escapeHtml(formatDate(payment.createdAt))}</span>`,
+          badge(payment.status),
+          escapeHtml(token(payment.amount, payment.asset)),
+          escapeHtml(String(item.attempts.length)),
+          `<strong>${escapeHtml(last?.step || "-")}</strong><span class="muted-cell">${escapeHtml(last?.error || last?.outcome || "No attempt recorded")}</span>`,
+          `<td class="row-actions">${button("Retry", "retry-execution", payment.id, "primary")}</td>`
+        ];
+      })
+    )}
     <div class="repair-attempts">
       ${items.map((item) => renderAttemptTrail(item)).join("")}
     </div>
@@ -91,138 +70,66 @@ function latestAttempt(item) {
 function renderReconciliationView() {
   const data = state.data;
   return `
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <div class="section-kicker">Reconciliation</div>
-          <h2>Exceptions</h2>
-        </div>
-        ${button("Simulate exception", "simulate-recon", "", "secondary")}
-      </div>
-      ${renderReconciliationTable(data.reconciliation)}
-    </section>
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <div class="section-kicker">Accounting</div>
-          <h2>Journal entries</h2>
-        </div>
-        ${button("Export batch", "export-accounting", "", "primary")}
-      </div>
-      ${renderJournalTable(data.journalEntries)}
-    </section>
+    ${panel({
+      kicker: "Reconciliation", title: "Exceptions", actions: button("Simulate exception", "simulate-recon", "", "secondary"),
+      body: renderReconciliationTable(data.reconciliation)
+    })}
+    ${panel({
+      kicker: "Accounting", title: "Journal entries", actions: button("Export batch", "export-accounting", "", "primary"),
+      body: renderJournalTable(data.journalEntries)
+    })}
   `;
 }
 
 function renderReconciliationTable(rows) {
   if (!rows.length) return emptyState("No reconciliation rows");
-  return `
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Payment</th>
-            <th>Source</th>
-            <th>Issue</th>
-            <th>Amount</th>
-            <th>Owner</th>
-            <th>Status</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rows.map((row) => {
-            const payment = findById(state.data.payments, row.paymentId);
-            return `
-              <tr>
-                <td><strong>${escapeHtml(payment?.reference || row.paymentId)}</strong><span class="muted-cell">${escapeHtml(`${row.ageHours}h`)}</span></td>
-                <td>${escapeHtml(row.source)}</td>
-                <td>${escapeHtml(row.issue)}</td>
-                <td>${escapeHtml(token(row.amount, row.asset))}</td>
-                <td>${escapeHtml(row.owner)}</td>
-                <td>${badge(row.status)}</td>
-                <td class="row-actions">${row.status === "Open" ? button("Resolve", "resolve-recon", row.id, "secondary") : ""}</td>
-              </tr>
-            `;
-          }).join("")}
-        </tbody>
-      </table>
-    </div>
-  `;
+  return table(
+    ["Payment", "Source", "Issue", "Amount", "Owner", "Status", ""],
+    rows.map((row) => {
+      const payment = findById(state.data.payments, row.paymentId);
+      return [
+        `<strong>${escapeHtml(payment?.reference || row.paymentId)}</strong><span class="muted-cell">${escapeHtml(`${row.ageHours}h`)}</span>`,
+        escapeHtml(row.source),
+        escapeHtml(row.issue),
+        escapeHtml(token(row.amount, row.asset)),
+        escapeHtml(row.owner),
+        badge(row.status),
+        `<td class="row-actions">${row.status === "Open" ? button("Resolve", "resolve-recon", row.id, "secondary") : ""}</td>`
+      ];
+    })
+  );
 }
 
 function renderJournalTable(rows) {
   if (!rows.length) return emptyState("No journal lines");
-  return `
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Date</th>
-            <th>Entity</th>
-            <th>Payment</th>
-            <th>Account</th>
-            <th>Debit</th>
-            <th>Credit</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rows.map((row) => {
-            const entity = findById(state.data.entities, row.entityId);
-            const payment = findById(state.data.payments, row.paymentId);
-            return `
-              <tr>
-                <td>${escapeHtml(row.date)}</td>
-                <td>${escapeHtml(entity?.erpCode || row.entityId)}</td>
-                <td>${escapeHtml(payment?.reference || row.paymentId)}</td>
-                <td>${escapeHtml(row.account)}</td>
-                <td>${escapeHtml(row.debit ? money(row.debit, row.currency) : "-")}</td>
-                <td>${escapeHtml(row.credit ? money(row.credit, row.currency) : "-")}</td>
-                <td>${badge(row.status)}</td>
-              </tr>
-            `;
-          }).join("")}
-        </tbody>
-      </table>
-    </div>
-  `;
+  return table(
+    ["Date", "Entity", "Payment", "Account", "Debit", "Credit", "Status"],
+    rows.map((row) => {
+      const entity = findById(state.data.entities, row.entityId);
+      const payment = findById(state.data.payments, row.paymentId);
+      return [
+        escapeHtml(row.date),
+        escapeHtml(entity?.erpCode || row.entityId),
+        escapeHtml(payment?.reference || row.paymentId),
+        escapeHtml(row.account),
+        escapeHtml(row.debit ? money(row.debit, row.currency) : "-"),
+        escapeHtml(row.credit ? money(row.credit, row.currency) : "-"),
+        badge(row.status)
+      ];
+    })
+  );
 }
 
 function renderOperationsView() {
   const data = state.data;
   return `
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <div class="section-kicker">Providers</div>
-          <h2>Route health</h2>
-        </div>
-        ${button("Simulate incident", "simulate-incident", "", "secondary")}
-      </div>
-      <div class="provider-grid">
-        ${data.providers.map((provider) => renderProviderCard(provider)).join("")}
-      </div>
-    </section>
+    ${panel({
+      kicker: "Providers", title: "Route health", actions: button("Simulate incident", "simulate-incident", "", "secondary"),
+      body: `<div class="provider-grid">${data.providers.map((provider) => renderProviderCard(provider)).join("")}</div>`
+    })}
     <section class="split-grid">
-      <div class="panel">
-        <div class="panel-header">
-          <div>
-            <div class="section-kicker">Alerts</div>
-            <h2>Open events</h2>
-          </div>
-        </div>
-        ${renderAlertList(data.alerts)}
-      </div>
-      <div class="panel">
-        <div class="panel-header">
-          <div>
-            <div class="section-kicker">Audit trail</div>
-            <h2>Latest events</h2>
-          </div>
-        </div>
-        ${renderAuditList(data.audit)}
-      </div>
+      ${panel({ tag: "div", kicker: "Alerts", title: "Open events", body: renderAlertList(data.alerts) })}
+      ${panel({ tag: "div", kicker: "Audit trail", title: "Latest events", body: renderAuditList(data.audit) })}
     </section>
   `;
 }
@@ -262,30 +169,14 @@ function renderRiskLane() {
   if (!items.length) return emptyState("No open work");
   return `
     <div class="risk-list">
-      ${items.map((item) => `
-        <article class="list-card">
-          <div>
-            <div class="card-title">${escapeHtml(item.title)}</div>
-            <div class="card-subtitle">${escapeHtml(item.body)}</div>
-          </div>
-          ${badge(item.severity)}
-        </article>
-      `).join("")}
+      ${items.map((item) => listCard(item.title, item.body, badge(item.severity))).join("")}
     </div>
   `;
 }
 
 function renderAlertList(alerts) {
   if (!alerts.length) return emptyState("No alerts");
-  return `<div class="risk-list">${alerts.map((alert) => `
-    <article class="list-card">
-      <div>
-        <div class="card-title">${escapeHtml(alert.title)}</div>
-        <div class="card-subtitle">${escapeHtml(alert.detail)}</div>
-      </div>
-      ${badge(alert.severity)}
-    </article>
-  `).join("")}</div>`;
+  return `<div class="risk-list">${alerts.map((alert) => listCard(alert.title, alert.detail, badge(alert.severity))).join("")}</div>`;
 }
 
 function renderAuditList(audit) {
