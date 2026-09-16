@@ -9,7 +9,7 @@ const OPS = "operations";
 // Counters exposed via gateway metrics.
 export const webhookMetrics = { signatureFailures: 0, processed: 0, duplicates: 0 };
 
-export function verifySignature(rawBody, secret, signature) {
+function verifySignature(rawBody, secret, signature) {
   const expected = createHmac("sha256", secret).update(String(rawBody)).digest("hex");
   const expectedBuffer = Buffer.from(expected, "hex");
   const providedBuffer = Buffer.from(String(signature || ""), "hex");

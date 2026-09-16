@@ -1,40 +1,26 @@
-import { query, withTransaction, runWithTenant } from "../../../packages/shared/db.mjs";
-import { createJsonService, httpError, ok, route } from "../../../packages/shared/http.mjs";
+import { query, withTransaction } from "../../../packages/shared/db.mjs";
+import { httpError, ok, route } from "../../../packages/shared/http.mjs";
 import { moneyNumber, parseMoneyInput } from "../../../packages/shared/money.mjs";
-import { DEFAULT_TENANT_ID, tenantIdFromHeaders } from "../../../packages/shared/tenant.mjs";
-import { validateProductionConfig } from "../../../packages/shared/config.mjs";
+import { createDomainService } from "../../../packages/shared/service.mjs";
+import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
 import { getOrCreateSharedAccount, getOrCreateWalletAccount, getWalletBalance, postTransaction } from "./ledger.mjs";
 import { reseedWallets } from "./seed.mjs";
 
 const port = Number(process.env.PORT || 4101);
 const DB = "wallet";
 
-validateProductionConfig("wallet-service");
-// Bootstrap runs outside any request: enter the default-tenant RLS context explicitly
-// so the seeded-data existence check does not fail closed (0 rows) and reseed every boot.
-await runWithTenant(DEFAULT_TENANT_ID, bootstrap);
-
-createJsonService({
+await createDomainService({
   name: "wallet-service",
   port,
-  internalAuthRequired: true,
+  db: DB,
+  seed: { table: "wallet.wallets", reseed: reseedWallets, list: listWallets },
   routes: [
-    route("GET", "/health", () => ok({ status: "ok", service: "wallet-service" }), { public: true }),
-    route("GET", "/ready", async () => {
-      await query(DB, "SELECT 1");
-      return ok({ status: "ready" });
-    }, { public: true }),
-    route("POST", "/reset", async ({ headers }) => {
-      const tenantId = tenantIdFromHeaders(headers);
-      await reseedWallets(tenantId);
-      return ok(await listWallets(tenantId));
-    }),
-    route("GET", "/entities", async ({ headers }) => ok(await listEntities(tenantIdFromHeaders(headers)))),
-    route("GET", "/entities/:id", async ({ params, headers }) => ok(await findEntity(params.id, tenantIdFromHeaders(headers)))),
-    route("GET", "/assets", async ({ headers }) => ok(await listAssets(tenantIdFromHeaders(headers)))),
-    route("GET", "/assets/:id", async ({ params, headers }) => ok(await findAsset(params.id, tenantIdFromHeaders(headers)))),
-    route("GET", "/wallets", async ({ headers }) => ok(await listWallets(tenantIdFromHeaders(headers)))),
-    route("GET", "/wallets/:id", async ({ params, headers }) => ok(await findWallet(params.id, tenantIdFromHeaders(headers)))),
+    route("GET", "/entities", async ({ tenantId }) => ok(await listEntities(tenantId))),
+    route("GET", "/entities/:id", async ({ params, tenantId }) => ok(await findEntity(params.id, tenantId))),
+    route("GET", "/assets", async ({ tenantId }) => ok(await listAssets(tenantId))),
+    route("GET", "/assets/:id", async ({ params, tenantId }) => ok(await findAsset(params.id, tenantId))),
+    route("GET", "/wallets", async ({ tenantId }) => ok(await listWallets(tenantId))),
+    route("GET", "/wallets/:id", async ({ params, tenantId }) => ok(await findWallet(params.id, tenantId))),
     // The debit request splits principal and fee so the ledger can route each correctly: the
     // fee always leaves to the shared fees account (a real cost either way), while the principal
     // goes to the destination wallet's own ledger account when the counterparty resolves to
@@ -42,8 +28,7 @@ createJsonService({
     // settlement_clearing account when it's leaving custody to an external party. Before this
     // ledger existed, intra-group payments only ever debited the source wallet -- the money had
     // nowhere to land and simply vanished from the books.
-    route("POST", "/wallets/:id/debit", async ({ params, body, headers }) => {
-      const tenantId = tenantIdFromHeaders(headers);
+    route("POST", "/wallets/:id/debit", async ({ params, body, headers, tenantId }) => {
       const idempotencyKey = headers["idempotency-key"] || body.idempotencyKey;
       if (!idempotencyKey) {
         throw httpError(428, "Idempotency-Key is required for wallet debits", "idempotency_required");
@@ -94,17 +79,18 @@ createJsonService({
           throw httpError(409, "Insufficient wallet balance", "insufficient_balance");
         }
 
-        const sourceAccount = await getOrCreateWalletAccount(client, wallet.id, wallet.asset_id, tenantId);
-        const entries = [{ accountId: sourceAccount.id, direction: "debit", amount: total }];
+        const entries = [{
+          accountId: (await getOrCreateWalletAccount(client, wallet.id, wallet.asset_id, tenantId)).id,
+          direction: "debit",
+          amount: total
+        }];
 
-        let destinationWallet = null;
-        if (body.destinationWalletId && body.destinationWalletId !== wallet.id) {
-          const destRows = await client.query("SELECT * FROM wallet.wallets WHERE id = $1 AND tenant_id = $2 AND status = 'Active'", [
-            body.destinationWalletId,
-            tenantId
-          ]);
-          destinationWallet = destRows.rows[0] || null;
-        }
+        const destinationWallet = body.destinationWalletId && body.destinationWalletId !== wallet.id
+          ? (await client.query(
+              "SELECT * FROM wallet.wallets WHERE id = $1 AND tenant_id = $2 AND status = 'Active'",
+              [body.destinationWalletId, tenantId]
+            )).rows[0] || null
+          : null;
 
         if (destinationWallet && destinationWallet.asset_id === wallet.asset_id) {
           const destAccount = await getOrCreateWalletAccount(client, destinationWallet.id, destinationWallet.asset_id, tenantId);
@@ -186,35 +172,19 @@ async function findAsset(id, tenantId = DEFAULT_TENANT_ID) {
   return toAssetShape(rows[0]);
 }
 
+// Balance comes from the wallet_balances view (derived from the ledger), never a column write.
+const WALLET_SELECT = `
+  SELECT w.*, wb.balance
+    FROM wallet.wallets w
+    LEFT JOIN wallet.wallet_balances wb ON wb.wallet_id = w.id`;
+
 async function listWallets(tenantId = DEFAULT_TENANT_ID) {
-  const { rows } = await query(
-    DB,
-    `SELECT w.*, wb.balance
-     FROM wallet.wallets w
-     LEFT JOIN wallet.wallet_balances wb ON wb.wallet_id = w.id
-     WHERE w.tenant_id = $1
-     ORDER BY w.id`,
-    [tenantId]
-  );
+  const { rows } = await query(DB, `${WALLET_SELECT} WHERE w.tenant_id = $1 ORDER BY w.id`, [tenantId]);
   return rows.map(toWalletShape);
 }
 
 async function findWallet(id, tenantId = DEFAULT_TENANT_ID) {
-  const { rows } = await query(
-    DB,
-    `SELECT w.*, wb.balance
-     FROM wallet.wallets w
-     LEFT JOIN wallet.wallet_balances wb ON wb.wallet_id = w.id
-     WHERE w.id = $1 AND w.tenant_id = $2`,
-    [id, tenantId]
-  );
+  const { rows } = await query(DB, `${WALLET_SELECT} WHERE w.id = $1 AND w.tenant_id = $2`, [id, tenantId]);
   if (!rows[0]) throw httpError(404, `wallet ${id} not found`, "not_found");
   return toWalletShape(rows[0]);
-}
-
-async function bootstrap() {
-  const { rows } = await query(DB, "SELECT COUNT(*)::int AS count FROM wallet.wallets WHERE tenant_id = $1", [DEFAULT_TENANT_ID]);
-  if (rows[0].count === 0) {
-    await reseedWallets();
-  }
 }

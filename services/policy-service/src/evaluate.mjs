@@ -1,6 +1,6 @@
-import { ratesToEur, roundMoney } from "../../../packages/shared/data.mjs";
 import { httpError } from "../../../packages/shared/http.mjs";
-import { moneyNumber } from "../../../packages/shared/money.mjs";
+import { moneyNumber, roundMoney } from "../../../packages/shared/money.mjs";
+import { requiredApprovalsFor, valueToEur } from "../../../packages/shared/policy-math.mjs";
 
 export function evaluate({ payment, wallet, wallets, asset, counterparty, provider }, policies) {
   if (!payment || !wallet || !asset || !counterparty || !provider) {
@@ -89,19 +89,8 @@ export function validatePolicy(policy) {
   }
 }
 
-export function requiredApprovalsFor(amountEur, policies) {
-  if (amountEur >= policies.secondApprovalThreshold) {
-    return 2;
-  }
-  if (amountEur >= policies.approvalThreshold) {
-    return 1;
-  }
-  return 0;
-}
-
-export function valueToEur(amount, asset) {
-  return moneyNumber(amount || 0) * (ratesToEur[asset] || 1);
-}
+// Re-exported for callers/tests that treat the policy service as the home of policy math.
+export { requiredApprovalsFor, valueToEur };
 
 // Measures the largest single-asset share of total treasury value, before and after this
 // payment. This is deliberately NOT "the payment asset's own share": subtracting the same
@@ -111,7 +100,7 @@ export function valueToEur(amount, asset) {
 // self-clear. The real risk this control exists to catch is different: draining one asset
 // while leaving another asset's wallets untouched can concentrate the *remaining* book in
 // whatever wasn't spent, so we track the maximum share across all assets.
-export function assetConcentrationAfterPayment(wallets, payment) {
+function assetConcentrationAfterPayment(wallets, payment) {
   const outgoing = valueToEur(roundMoney(moneyNumber(payment.amount || 0) + moneyNumber(payment.fee || 0)), payment.asset);
   const valueByAsset = new Map();
   for (const item of wallets) {

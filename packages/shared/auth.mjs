@@ -267,29 +267,37 @@ export function verifyCsrf(sessionUser, headerToken, { authSource } = {}) {
   return String(headerToken || "") === String(sessionUser.csrfToken);
 }
 
-export function sessionCookieHeader(token, expiresAt, { httpOnly = true } = {}) {
-  const secure = process.env.SESSION_COOKIE_SECURE === "true";
-  const maxAge = Math.max(0, Math.ceil((new Date(expiresAt).getTime() - Date.now()) / 1000));
-  let cookie = `${SESSION_COOKIE_NAME}=${token}; Path=/; SameSite=Lax; Max-Age=${maxAge}`;
-  if (httpOnly) cookie += "; HttpOnly";
-  if (secure) cookie += "; Secure";
-  return cookie;
+function buildCookie(name, value, maxAge, httpOnly) {
+  const secure = process.env.SESSION_COOKIE_SECURE === "true" ? "; Secure" : "";
+  const onlyForJs = httpOnly ? "; HttpOnly" : "";
+  return `${name}=${value}; Path=/; SameSite=Lax; Max-Age=${maxAge}${onlyForJs}${secure}`;
+}
+
+function cookieMaxAge(expiresAt) {
+  return Math.max(0, Math.ceil((new Date(expiresAt).getTime() - Date.now()) / 1000));
+}
+
+export function sessionCookieHeader(token, expiresAt) {
+  return buildCookie(SESSION_COOKIE_NAME, token, cookieMaxAge(expiresAt), true);
 }
 
 export function csrfCookieHeader(token, expiresAt) {
-  const secure = process.env.SESSION_COOKIE_SECURE === "true";
-  const maxAge = Math.max(0, Math.ceil((new Date(expiresAt).getTime() - Date.now()) / 1000));
-  let cookie = `${CSRF_COOKIE_NAME}=${token}; Path=/; SameSite=Lax; Max-Age=${maxAge}`;
-  if (secure) cookie += "; Secure";
-  return cookie;
+  return buildCookie(CSRF_COOKIE_NAME, token, cookieMaxAge(expiresAt), false);
 }
 
-export function sessionCookieName() {
-  return SESSION_COOKIE_NAME;
+// Max-Age=0 cookies that clear both auth cookies client-side on logout.
+export function clearAuthCookieHeaders() {
+  return [
+    buildCookie(SESSION_COOKIE_NAME, "", 0, true),
+    buildCookie(CSRF_COOKIE_NAME, "", 0, false)
+  ];
 }
 
-export function csrfCookieName() {
-  return CSRF_COOKIE_NAME;
+// The session token from a Cookie header specifically (used for session rotation on login).
+export function sessionTokenFromCookie(cookieHeader) {
+  if (!cookieHeader) return null;
+  const cookies = parseCookies(cookieHeader);
+  return cookies["__Host-session"] || cookies["session"] || null;
 }
 
 // CSRF-protected requireAuth: for cookie-authenticated sessions, require a matching
@@ -343,7 +351,7 @@ export function requireAuth(routeHandler, { optional = false } = {}) {
   };
 }
 
-export async function hasPermission(userId, tenantId, permission) {
+async function hasPermission(userId, tenantId, permission) {
   if (!AUTH_REQUIRED) return true; // Auth not enforced, grant all permissions
   const { rows } = await query(
     DB,
@@ -399,13 +407,7 @@ function extractToken(headers) {
   }
 
   // Accept both plain and __Host- prefixed session cookie names
-  const cookieHeader = headers["cookie"];
-  if (cookieHeader) {
-    const cookies = parseCookies(cookieHeader);
-    return cookies["__Host-session"] || cookies["session"] || null;
-  }
-
-  return null;
+  return sessionTokenFromCookie(headers["cookie"]);
 }
 
 function parseCookies(cookieHeader) {

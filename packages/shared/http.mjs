@@ -13,194 +13,78 @@ const contentTypes = {
   ".svg": "image/svg+xml"
 };
 
-// Rate limiter: simple sliding-window counters per IP keyed by (ip, pathPrefix).
-// In production this would be a Redis-backed distributed counter; for single-process
-// services an in-memory Map per service instance is correct because each service
-// only serves one port and all requests to that port go through this code path.
-const RATE_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 1000);
-const RATE_MAX = Number(process.env.RATE_LIMIT_MAX || 200);
-const STATE_RATE_MAX = Number(process.env.STATE_RATE_LIMIT_MAX || 50);
-const rateBuckets = new Map();
-let rateCleanupTimer = null;
-
-// Proxy-aware client IP extraction: use socket address by default.
-// Set TRUST_PROXY_HEADERS=true to honor X-Forwarded-For from trusted proxies.
-function getClientIp(req) {
-  const trustProxy = process.env.TRUST_PROXY_HEADERS === "true";
-  if (trustProxy && req.headers["x-forwarded-for"]) {
-    const fwd = req.headers["x-forwarded-for"].split(",")[0].trim();
-    return fwd.startsWith("::ffff:") ? fwd.slice(7) : fwd;
-  }
-  const remote = req.socket?.remoteAddress || "127.0.0.1";
-  return remote.startsWith("::ffff:") ? remote.slice(7) : remote;
-}
-
-function checkRateLimit(req, now, windowMs, limit, bucketKey) {
-  const ip = getClientIp(req);
-  const key = `${bucketKey}:${ip}`;
-  let bucket = rateBuckets.get(key);
-  if (!bucket || bucket.resetAt <= now) {
-    bucket = { tokens: limit, resetAt: now + windowMs };
-    rateBuckets.set(key, bucket);
-    startRateCleanup();
-  }
-  if (bucket.tokens <= 0) {
-    return { allowed: false, retryAfterMs: Math.max(0, bucket.resetAt - now) };
-  }
-  bucket.tokens -= 1;
-  return { allowed: true, remaining: bucket.tokens };
-}
-
-function startRateCleanup() {
-  if (rateCleanupTimer) return;
-  rateCleanupTimer = setInterval(() => {
-    const now = Date.now();
-    for (const [key, bucket] of rateBuckets) {
-      if (bucket.resetAt <= now) rateBuckets.delete(key);
-    }
-    if (rateBuckets.size === 0) {
-      clearInterval(rateCleanupTimer);
-      rateCleanupTimer = null;
-    }
-  }, Math.max(RATE_WINDOW_MS, 10000));
-  rateCleanupTimer.unref();
-}
-
 export function createJsonService({ name, port, routes, staticRoot, internalAuthRequired = false, rateLimit = !internalAuthRequired, extraMetrics } = {}) {
   const host = process.env.HOST || "127.0.0.1";
   const metrics = createMetrics(name);
+  const limiter = createRateLimiter();
+  const registeredRoutes = internalAuthRequired ? routes.map(requireInternalAuth) : routes;
   let draining = false;
+
   const server = createServer(async (req, res) => {
     const started = Date.now();
-    const requestId = req.headers["x-request-id"] || cryptoRandomId();
+    const requestId = req.headers["x-request-id"] || randomUUID();
     setBaseHeaders(res, requestId);
+    const finish = (status) => {
+      metrics.record(status, Date.now() - started);
+      logRequest(name, req.method, req.url, status, Date.now() - started, requestId);
+    };
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
       res.end();
-      metrics.record(204, Date.now() - started);
-      return;
+      return finish(204);
     }
 
     try {
       const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
-      if (url.pathname === "/metrics" && req.method === "GET") {
+      const path = url.pathname;
+
+      if (path === "/metrics" && req.method === "GET") {
         const snapshot = metrics.snapshot();
-        if (extraMetrics) {
-          Object.assign(snapshot, await extraMetrics());
-        }
+        if (extraMetrics) Object.assign(snapshot, await extraMetrics());
         sendJson(res, 200, snapshot);
-        return;
+        return; // Scrapes are not request traffic: no counter/log entry.
       }
-      if (draining && url.pathname !== "/health") {
+
+      if (draining && path !== "/health") {
         sendJson(res, 503, { error: "service_draining", service: name });
-        metrics.record(503, Date.now() - started);
-        logRequest(name, req.method, url.pathname, 503, Date.now() - started, requestId);
-        return;
+        return finish(503);
       }
 
-      // Rate limiting: separate buckets for state reads vs general routes.
-      // Bypass for health checks so they never consume rate-limit tokens.
-      if (rateLimit && url.pathname !== "/health") {
-        const isStateRoute = url.pathname === "/api/state";
-        const bucketKey = isStateRoute ? "state" : "general";
-        const limit = isStateRoute ? STATE_RATE_MAX : RATE_MAX;
-        const rateResult = checkRateLimit(req, Date.now(), RATE_WINDOW_MS, limit, bucketKey);
-        if (!rateResult.allowed) {
-          res.setHeader("Retry-After", Math.ceil(rateResult.retryAfterMs / 1000));
-          sendJson(res, 429, {
-            error: "rate_limited",
-            message: "Too many requests",
-            retryAfterMs: rateResult.retryAfterMs
-          });
-          metrics.record(429, Date.now() - started);
-          logRequest(name, req.method, url.pathname, 429, Date.now() - started, requestId);
-          return;
+      // Health checks never consume rate-limit tokens; /api/state has its own tighter budget.
+      if (rateLimit && path !== "/health") {
+        const isStateRoute = path === "/api/state";
+        const rate = limiter.check(req, isStateRoute ? "state" : "general", isStateRoute ? STATE_RATE_MAX : RATE_MAX);
+        if (!rate.allowed) {
+          res.setHeader("Retry-After", Math.ceil(rate.retryAfterMs / 1000));
+          sendJson(res, 429, { error: "rate_limited", message: "Too many requests", retryAfterMs: rate.retryAfterMs });
+          return finish(429);
         }
       }
 
-      const route = matchRoute(internalRoutes, req.method, url.pathname);
-
-      if (route) {
-        const { body, rawBody } = await readJson(req);
-        // Extract acting user from the X-Acting-User header when present.
-        // In internal-auth mode, validateInternalAuth verifies the payload signature;
-        // in dev mode, the header is trusted as-is (dev ergonomics).
-        // Malformed JSON is caught here rather than throwing 500 after auth is bypassed.
-        const actingUserHeader = req.headers["x-acting-user"] || "";
-        let actingUser = null;
-        if (actingUserHeader) {
-          try {
-            actingUser = JSON.parse(actingUserHeader);
-          } catch {
-            // Malformed header: treat as absent. Don't throw — that would be an
-            // unauthenticated caller choosing our error status code.
-            actingUser = null;
-          }
-        }
-        const context = {
-          body,
-          rawBody,
-          headers: req.headers,
-          method: req.method,
-          params: route.params,
-          query: Object.fromEntries(url.searchParams),
-          requestId,
-          url,
-          clientIp: getClientIp(req),
-          actingUser
-        };
-        // Enter the tenant context for RLS: db.mjs picks this up and sets the
-        // transaction-local app.tenant_id that row-level security policies check.
-        // Missing header → default tenant (or 400 when TENANT_HEADER_REQUIRED and non-public);
-        // present-but-invalid UUID → 400 (fail closed). Public routes (health/ready) never
-        // require a tenant header so probes stay unauthenticated and header-free.
-        const tenantRequired = process.env.TENANT_HEADER_REQUIRED === "true" && !route.public;
-        const result = await runWithTenant(
-          tenantIdFromHeaders(req.headers, { required: tenantRequired }),
-          () => route.handler(context)
-        );
-        // Route handlers can set cookies by returning a `cookies` array of Set-Cookie strings.
-        if (result?.cookies?.length) {
-          res.setHeader("Set-Cookie", [...result.cookies]);
-        }
-        sendJson(res, result?.status || 200, result?.body ?? result);
-        metrics.record(result?.status || 200, Date.now() - started);
-        logRequest(name, req.method, url.pathname, result?.status || 200, Date.now() - started, requestId);
-        return;
+      const matched = matchRoute(registeredRoutes, req.method, path);
+      if (matched) {
+        const status = await dispatch(matched, req, res, url, requestId);
+        return finish(status);
       }
 
-      if (staticRoot && req.method === "GET") {
-        const served = await serveStatic(staticRoot, url.pathname, res);
-        if (served) {
-          metrics.record(200, Date.now() - started);
-          logRequest(name, req.method, url.pathname, 200, Date.now() - started, requestId);
-          return;
-        }
+      if (staticRoot && req.method === "GET" && await serveStatic(staticRoot, path, res)) {
+        return finish(200);
       }
 
-      sendJson(res, 404, { error: "not_found", service: name, path: url.pathname });
-      metrics.record(404, Date.now() - started);
-      logRequest(name, req.method, url.pathname, 404, Date.now() - started, requestId);
+      sendJson(res, 404, { error: "not_found", service: name, path });
+      return finish(404);
     } catch (error) {
       const status = error.status || 500;
       if (!res.headersSent) {
-        sendJson(res, status, {
-          error: error.code || "internal_error",
-          message: error.message,
-          service: name
-        });
+        sendJson(res, status, { error: error.code || "internal_error", message: error.message, service: name });
       }
-      metrics.record(status, Date.now() - started);
-      logRequest(name, req.method, req.url, status, Date.now() - started, requestId);
+      return finish(status);
     }
   });
+
   // headersTimeout must stay below requestTimeout: headers are a prefix of the whole request,
   // so they must always arrive first and faster.
-  const internalRoutes = internalAuthRequired && INTERNAL_AUTH_REQUIRED
-    ? routes.map((rt) => rt.public ? rt : { ...rt, handler: validateInternalAuth(rt.handler) })
-    : routes;
-
   server.headersTimeout = Number(process.env.HTTP_HEADERS_TIMEOUT_MS || 8000);
   server.requestTimeout = Number(process.env.HTTP_REQUEST_TIMEOUT_MS || 30000);
 
@@ -223,6 +107,40 @@ export function createJsonService({ name, port, routes, staticRoot, internalAuth
   return server;
 }
 
+// Dispatch a matched route and return the response status for metrics/logging.
+async function dispatch(matched, req, res, url, requestId) {
+  const { body, rawBody } = await readJson(req);
+  const context = {
+    body,
+    rawBody,
+    headers: req.headers,
+    method: req.method,
+    params: matched.params,
+    query: Object.fromEntries(url.searchParams),
+    requestId,
+    url,
+    clientIp: getClientIp(req),
+    // Malformed JSON in the acting-user header is treated as absent: an unauthenticated
+    // caller must not be able to pick our error status code by sending garbage.
+    actingUser: parseActingUser(req.headers["x-acting-user"])
+  };
+  // Enter the tenant context for RLS: db.mjs picks this up and sets the transaction-local
+  // app.tenant_id that row-level security policies check. Missing header -> default tenant
+  // (or 400 when TENANT_HEADER_REQUIRED and non-public); invalid UUID -> 400 (fail closed).
+  // Public routes (health/ready) never require a tenant header so probes stay header-free.
+  const tenantRequired = process.env.TENANT_HEADER_REQUIRED === "true" && !matched.public;
+  const result = await runWithTenant(
+    tenantIdFromHeaders(req.headers, { required: tenantRequired }),
+    () => matched.handler(context)
+  );
+  // Route handlers can set cookies by returning a `cookies` array of Set-Cookie strings.
+  if (result?.cookies?.length) {
+    res.setHeader("Set-Cookie", [...result.cookies]);
+  }
+  sendJson(res, result?.status || 200, result?.body ?? result);
+  return result?.status || 200;
+}
+
 export function route(method, pattern, handler, opts = {}) {
   return { method, pattern, handler, public: opts.public === true };
 }
@@ -241,7 +159,7 @@ export function httpError(status, message, code) {
 // Internal service authentication. When INTERNAL_AUTH_REQUIRED=true, services validate
 // a shared secret via HMAC over (method + path + body). Gateway, relay, and job-worker
 // sign their outgoing requests with the same secret and same payload shape.
-// Keep local dev ergonomic: defaults to off.
+// In dev mode (default) the wrapper is transparent and the acting user is trusted as-is.
 const INTERNAL_SERVICE_TOKEN = process.env.INTERNAL_SERVICE_TOKEN || "dev-internal-token";
 const INTERNAL_AUTH_REQUIRED = process.env.INTERNAL_AUTH_REQUIRED === "true";
 
@@ -252,36 +170,40 @@ export function signInternalRequest(method, path, body, actingUser = "") {
   return { "X-Internal-Signature": signature, "X-Acting-User": actingUserStr };
 }
 
+function validateInternalAuth(routeHandler) {
+  return async (context) => {
+    if (!INTERNAL_AUTH_REQUIRED) return routeHandler(context);
+
+    const signature = context.headers["x-internal-signature"] || "";
+    const actingUserHeader = context.headers["x-acting-user"] || "";
+    const valid = verifyInternalRequest(context.method, context.url?.pathname || "/", context.body, signature, actingUserHeader);
+    if (!valid) {
+      throw httpError(401, "Internal authentication required", "internal_auth_required");
+    }
+    context.actingUser = parseActingUser(actingUserHeader);
+    return routeHandler(context);
+  };
+}
+
+function requireInternalAuth(routeDef) {
+  return routeDef.public ? routeDef : { ...routeDef, handler: validateInternalAuth(routeDef.handler) };
+}
+
 function verifyInternalRequest(method, path, body, signature, actingUserHeader = "") {
-  const actingUserStr = actingUserHeader || "";
-  const payload = `${method}|${path}|${JSON.stringify(body || {})}|${actingUserStr}`;
+  const payload = `${method}|${path}|${JSON.stringify(body || {})}|${actingUserHeader || ""}`;
   const expected = createHmac("sha256", INTERNAL_SERVICE_TOKEN).update(payload).digest("hex");
   const expectedBuf = Buffer.from(expected, "hex");
   const providedBuf = Buffer.from(String(signature || ""), "hex");
   return expectedBuf.length === providedBuf.length && timingSafeEqual(expectedBuf, providedBuf);
 }
 
-export function validateInternalAuth(routeHandler, opts = {}) {
-  return async (context) => {
-    if (!INTERNAL_AUTH_REQUIRED) {
-      // In dev mode, take acting user from header as-is (unsigned).
-      const actingUserHeader = context.headers["x-acting-user"] || "";
-      context.actingUser = actingUserHeader ? JSON.parse(actingUserHeader) : null;
-      return routeHandler(context);
-    }
-    if (opts.public) return routeHandler(context);
-
-    const sig = context.headers["x-internal-signature"] || "";
-    const actingUserHeader = context.headers["x-acting-user"] || "";
-    const method = context.method || "GET";
-    const path = context.url?.pathname || "/";
-    if (!verifyInternalRequest(method, path, context.body, sig, actingUserHeader)) {
-      throw httpError(401, "Internal authentication required", "internal_auth_required");
-    }
-    // Expose verified acting user to downstream handlers.
-    context.actingUser = actingUserHeader ? JSON.parse(actingUserHeader) : null;
-    return routeHandler(context);
-  };
+function parseActingUser(header) {
+  if (!header) return null;
+  try {
+    return JSON.parse(header);
+  } catch {
+    return null;
+  }
 }
 
 async function readJson(req) {
@@ -299,8 +221,8 @@ async function readJson(req) {
     }
     chunks.push(chunk);
   }
-  // rawBody carries the exact request bytes (untrimmed) for signature verification
-  // over the raw body; body is the parsed JSON as before.
+  // rawBody carries the exact request bytes (untrimmed) for signature verification over the
+  // raw body; body is the parsed JSON.
   const rawBody = Buffer.concat(chunks).toString("utf8");
   const bodyText = rawBody.trim();
   if (!bodyText) {
@@ -308,7 +230,7 @@ async function readJson(req) {
   }
   try {
     return { body: JSON.parse(bodyText), rawBody };
-  } catch (error) {
+  } catch {
     throw httpError(400, "Request body must be valid JSON", "invalid_json");
   }
 }
@@ -317,9 +239,7 @@ function matchRoute(routes, method, pathname) {
   for (const candidate of routes) {
     if (candidate.method !== method) continue;
     const params = matchPath(candidate.pattern, pathname);
-    if (params) {
-      return { ...candidate, params };
-    }
+    if (params) return { ...candidate, params };
   }
   return null;
 }
@@ -327,18 +247,14 @@ function matchRoute(routes, method, pathname) {
 function matchPath(pattern, pathname) {
   const patternParts = pattern.split("/").filter(Boolean);
   const pathParts = pathname.split("/").filter(Boolean);
-  if (patternParts.length !== pathParts.length) {
-    return null;
-  }
+  if (patternParts.length !== pathParts.length) return null;
   const params = {};
   for (let index = 0; index < patternParts.length; index += 1) {
     const patternPart = patternParts[index];
     const pathPart = pathParts[index];
     if (patternPart.startsWith(":")) {
       params[patternPart.slice(1)] = decodeURIComponent(pathPart);
-      continue;
-    }
-    if (patternPart !== pathPart) {
+    } else if (patternPart !== pathPart) {
       return null;
     }
   }
@@ -356,7 +272,6 @@ function serveStatic(root, pathname, res) {
       return;
     }
 
-    const ext = extname(filePath);
     const stream = createReadStream(filePath);
     stream.on("error", () => {
       // The file existed at statSync-time but failed to read (deleted mid-request, permission
@@ -371,9 +286,7 @@ function serveStatic(root, pathname, res) {
       }
       resolve(true);
     });
-    res.writeHead(200, {
-      "Content-Type": contentTypes[ext] || "application/octet-stream"
-    });
+    res.writeHead(200, { "Content-Type": contentTypes[extname(filePath)] || "application/octet-stream" });
     stream.pipe(res);
     stream.on("end", () => resolve(true));
   });
@@ -411,19 +324,67 @@ function logRequest(name, method, path, status, durationMs, requestId) {
   console.log(JSON.stringify({ at: new Date().toISOString(), service: name, method, path, status, durationMs, requestId }));
 }
 
-function cryptoRandomId() {
-  return randomUUID();
+// Proxy-aware client IP extraction: use socket address by default.
+// Set TRUST_PROXY_HEADERS=true to honor X-Forwarded-For from trusted proxies.
+function getClientIp(req) {
+  if (process.env.TRUST_PROXY_HEADERS === "true" && req.headers["x-forwarded-for"]) {
+    return stripV4Mapped(req.headers["x-forwarded-for"].split(",")[0].trim());
+  }
+  return stripV4Mapped(req.socket?.remoteAddress || "127.0.0.1");
+}
+
+function stripV4Mapped(ip) {
+  return ip.startsWith("::ffff:") ? ip.slice(7) : ip;
+}
+
+// Sliding-window counters per (ip, bucket). In production this would be a Redis-backed
+// distributed counter; for single-process services an in-memory Map is correct because each
+// service only serves one port.
+const RATE_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 1000);
+const RATE_MAX = Number(process.env.RATE_LIMIT_MAX || 200);
+const STATE_RATE_MAX = Number(process.env.STATE_RATE_LIMIT_MAX || 50);
+
+function createRateLimiter() {
+  const buckets = new Map();
+  let cleanupTimer = null;
+
+  function scheduleCleanup() {
+    if (cleanupTimer) return;
+    cleanupTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [key, bucket] of buckets) {
+        if (bucket.resetAt <= now) buckets.delete(key);
+      }
+      if (buckets.size === 0) {
+        clearInterval(cleanupTimer);
+        cleanupTimer = null;
+      }
+    }, Math.max(RATE_WINDOW_MS, 10000));
+    cleanupTimer.unref();
+  }
+
+  return {
+    check(req, bucketName, limit) {
+      const key = `${bucketName}:${getClientIp(req)}`;
+      const now = Date.now();
+      let bucket = buckets.get(key);
+      if (!bucket || bucket.resetAt <= now) {
+        bucket = { tokens: limit, resetAt: now + RATE_WINDOW_MS };
+        buckets.set(key, bucket);
+        scheduleCleanup();
+      }
+      if (bucket.tokens <= 0) {
+        return { allowed: false, retryAfterMs: Math.max(0, bucket.resetAt - now) };
+      }
+      bucket.tokens -= 1;
+      return { allowed: true };
+    }
+  };
 }
 
 function createMetrics(service) {
   const startedAt = new Date().toISOString();
-  const counters = {
-    requests: 0,
-    status2xx: 0,
-    status4xx: 0,
-    status5xx: 0,
-    totalDurationMs: 0
-  };
+  const counters = { requests: 0, status2xx: 0, status4xx: 0, status5xx: 0, totalDurationMs: 0 };
   return {
     record(status, durationMs) {
       counters.requests += 1;

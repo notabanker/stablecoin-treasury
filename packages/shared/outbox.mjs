@@ -29,7 +29,7 @@ export async function appendOutboxEvents(client, events) {
 // the relay becomes exactly-once effect. Returns true when this call should proceed with the real
 // work; returns false when the event was already handled (duplicate delivery, callers should
 // return 200 without repeating the side effect).
-export async function claimInboxEvent(client, eventId, consumer) {
+async function claimInboxEvent(client, eventId, consumer) {
   const { rows } = await client.query(
     "INSERT INTO platform.inbox_events (event_id, consumer) VALUES ($1, $2) ON CONFLICT (event_id, consumer) DO NOTHING RETURNING event_id",
     [eventId, consumer]

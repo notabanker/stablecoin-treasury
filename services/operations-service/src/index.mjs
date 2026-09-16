@@ -1,61 +1,42 @@
 import { insertAuditEventChained } from "../../../packages/shared/audit.mjs";
 import { createId } from "../../../packages/shared/data.mjs";
-import { query, withTransaction, runWithTenant } from "../../../packages/shared/db.mjs";
-import { createJsonService, httpError, ok, route } from "../../../packages/shared/http.mjs";
+import { query, withTransaction } from "../../../packages/shared/db.mjs";
+import { httpError, ok, route } from "../../../packages/shared/http.mjs";
 import { withInboxDedup } from "../../../packages/shared/outbox.mjs";
-import { DEFAULT_TENANT_ID, tenantIdFromHeaders } from "../../../packages/shared/tenant.mjs";
-import { validateProductionConfig } from "../../../packages/shared/config.mjs";
+import { createDomainService } from "../../../packages/shared/service.mjs";
+import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
 import { reseedOperations } from "./seed.mjs";
 
 const port = Number(process.env.PORT || 4107);
 const DB = "operations";
 
-validateProductionConfig("operations-service");
-// Bootstrap runs outside any request: enter the default-tenant RLS context explicitly
-// so the seeded-data existence check does not fail closed (0 rows) and reseed every boot.
-await runWithTenant(DEFAULT_TENANT_ID, bootstrap);
-
-createJsonService({
+await createDomainService({
   name: "operations-service",
   port,
-  internalAuthRequired: true,
+  db: DB,
+  seed: { table: "operations.providers", reseed: reseedOperations, list: listProviders },
   routes: [
-    route("GET", "/health", () => ok({ status: "ok", service: "operations-service" }), { public: true }),
-    route("GET", "/ready", async () => {
-      await query(DB, "SELECT 1");
-      return ok({ status: "ready" });
-    }, { public: true }),
-    route("POST", "/reset", async ({ headers }) => {
-      const tenantId = tenantIdFromHeaders(headers);
-      await reseedOperations(tenantId);
-      return ok(await listProviders(tenantId));
-    }),
-    route("GET", "/providers", async ({ headers }) => ok(await listProviders(tenantIdFromHeaders(headers)))),
-    route("GET", "/providers/:id", async ({ params, headers }) => ok(await findProvider(params.id, tenantIdFromHeaders(headers)))),
-    route("POST", "/providers/:id/toggle", async ({ params, body, headers }) => {
-      const tenantId = tenantIdFromHeaders(headers);
+    route("GET", "/providers", async ({ tenantId }) => ok(await listProviders(tenantId))),
+    route("GET", "/providers/:id", async ({ params, tenantId }) => ok(await findProvider(params.id, tenantId))),
+    route("POST", "/providers/:id/toggle", async ({ params, body, tenantId }) => {
       const provider = await findProvider(params.id, tenantId);
-      const nextStatus = provider.status === "Operational" ? "Degraded" : "Operational";
-      const nextIncident = nextStatus === "Degraded" ? "Manual route degradation" : "";
+      const status = provider.status === "Operational" ? "Degraded" : "Operational";
+      const incident = status === "Degraded" ? "Manual route degradation" : "";
       const { rows } = await query(
         DB,
         "UPDATE operations.providers SET status = $1, incident = $2 WHERE id = $3 AND tenant_id = $4 RETURNING *",
-        [nextStatus, nextIncident, params.id, tenantId]
+        [status, incident, params.id, tenantId]
       );
       const updated = toProviderShape(rows[0]);
       await appendAudit(body.actor || "System", "Provider status changed", updated.name, updated.status, tenantId);
       return ok(updated);
     }),
-    route("GET", "/audit", async ({ headers }) => ok(await listAudit(tenantIdFromHeaders(headers)))),
-    route("POST", "/audit", async ({ body, headers }) => {
-      const tenantId = tenantIdFromHeaders(headers);
-      return ok(await withInboxDedup(DB, headers, "operations", async (client) => {
-        return appendAudit(body.actor || "System", body.action, body.object, body.detail, tenantId, client);
-      }));
-    }),
-    route("GET", "/alerts", async ({ headers }) => ok(await listAlerts(tenantIdFromHeaders(headers)))),
-    route("POST", "/alerts", async ({ body, headers }) => {
-      const tenantId = tenantIdFromHeaders(headers);
+    route("GET", "/audit", async ({ tenantId }) => ok(await listAudit(tenantId))),
+    route("POST", "/audit", async ({ body, headers, tenantId }) =>
+      ok(await withInboxDedup(DB, headers, "operations", (client) =>
+        appendAudit(body.actor || "System", body.action, body.object, body.detail, tenantId, client)))),
+    route("GET", "/alerts", async ({ tenantId }) => ok(await listAlerts(tenantId))),
+    route("POST", "/alerts", async ({ body, headers, tenantId }) => {
       const alert = {
         id: createId("alt"),
         severity: body.severity || "Medium",
@@ -63,10 +44,9 @@ createJsonService({
         detail: body.detail || "",
         status: body.status || "Open"
       };
-      return ok(await withInboxDedup(DB, headers, "operations", async (client) => insertAlert(alert, tenantId, client)));
+      return ok(await withInboxDedup(DB, headers, "operations", (client) => insertAlert(alert, tenantId, client)));
     }),
-    route("POST", "/incidents/simulate", async ({ headers }) => {
-      const tenantId = tenantIdFromHeaders(headers);
+    route("POST", "/incidents/simulate", async ({ tenantId }) => {
       const { rows } = await query(
         DB,
         "SELECT * FROM operations.providers WHERE tenant_id = $1 AND status = 'Operational' LIMIT 1",
@@ -88,11 +68,7 @@ createJsonService({
         detail: "Synthetic latency incident recorded.",
         status: "Open"
       };
-      await query(
-        DB,
-        "INSERT INTO operations.alerts (id, tenant_id, severity, title, detail, status) VALUES ($1, $2, $3, $4, $5, $6)",
-        [alert.id, tenantId, alert.severity, alert.title, alert.detail, alert.status]
-      );
+      await insertAlert(alert, tenantId);
       await appendAudit("System monitor", "Provider incident opened", provider.name, provider.incident, tenantId);
       return ok({ provider, alert });
     })
@@ -146,9 +122,11 @@ async function listAudit(tenantId = DEFAULT_TENANT_ID) {
   return rows.map(toAuditShape);
 }
 
+// Insert an alert on an existing transaction client when one is given (inbox-dedup path),
+// otherwise as its own statement.
 async function insertAlert(alert, tenantId = DEFAULT_TENANT_ID, client = null) {
-  const q = client || { query: (...args) => query(DB, ...args) };
-  await q.query(
+  const run = client || { query: (...args) => query(DB, ...args) };
+  await run.query(
     "INSERT INTO operations.alerts (id, tenant_id, severity, title, detail, status) VALUES ($1, $2, $3, $4, $5, $6)",
     [alert.id, tenantId, alert.severity, alert.title, alert.detail, alert.status]
   );
@@ -165,11 +143,4 @@ async function appendAudit(actor, action, object, detail, tenantId = DEFAULT_TEN
     await withTransaction(DB, (tx) => insertAuditEventChained(tx, { ...event, tenantId }));
   }
   return toAuditShape(event);
-}
-
-async function bootstrap() {
-  const { rows } = await query(DB, "SELECT COUNT(*)::int AS count FROM operations.providers WHERE tenant_id = $1", [DEFAULT_TENANT_ID]);
-  if (rows[0].count === 0) {
-    await reseedOperations();
-  }
 }

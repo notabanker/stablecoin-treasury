@@ -1,12 +1,6 @@
-import { ratesToEur } from "../../../packages/shared/data.mjs";
+import { valueToEur, requiredApprovalsFor as approvalsForEur } from "../../../packages/shared/policy-math.mjs";
 
+// Amount + asset wrapper used when creating a payment.
 export function requiredApprovalsFor(amount, asset, policy) {
-  const amountEur = amount * (ratesToEur[asset] || 1);
-  if (amountEur >= policy.secondApprovalThreshold) {
-    return 2;
-  }
-  if (amountEur >= policy.approvalThreshold) {
-    return 1;
-  }
-  return 0;
+  return approvalsForEur(valueToEur(amount, asset), policy);
 }

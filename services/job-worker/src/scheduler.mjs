@@ -1,39 +1,23 @@
 import { enqueueJob } from "../../../packages/shared/jobs.mjs";
+import { logError } from "../../../packages/shared/log.mjs";
 
-const IDEMPOTENCY_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
-const AUTO_EXPIRY_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
-const WATCHDOG_INTERVAL_MS = Number(process.env.WATCHDOG_INTERVAL_MS || 60000); // 1 minute
-const AUDIT_CHAIN_VERIFY_INTERVAL_MS = Number(process.env.AUDIT_CHAIN_VERIFY_INTERVAL_MS || 24 * 60 * 60 * 1000); // nightly
+// Job type, repeat interval, initial delay. An interval <= 0 disables the job entirely
+// (tests use that to run without the watchdog).
+const SCHEDULES = [
+  ["idempotency-sweep", 6 * 60 * 60 * 1000, 0],
+  ["payment-auto-expiry", 60 * 60 * 1000, 0],
+  ["ops-watchdog", Number(process.env.WATCHDOG_INTERVAL_MS || 60000), 5000],
+  ["audit-chain-verify", Number(process.env.AUDIT_CHAIN_VERIFY_INTERVAL_MS || 24 * 60 * 60 * 1000), 0]
+];
 
+// Enqueue each periodic job immediately, then repeat on its interval.
 export function schedulePeriodicJobs() {
-  // Enqueue immediately, then repeat on interval
-  enqueueSweeper().catch((e) => console.error("sweeper initial enqueue failed:", e.message));
-  enqueueExpiry().catch((e) => console.error("expiry initial enqueue failed:", e.message));
-  if (WATCHDOG_INTERVAL_MS > 0) {
-    enqueueWatchdog().catch((e) => console.error("watchdog initial enqueue failed:", e.message));
-    setInterval(() => enqueueWatchdog().catch((e) => console.error("watchdog enqueue failed:", e.message)), WATCHDOG_INTERVAL_MS);
+  for (const [type, intervalMs, delayMs] of SCHEDULES) {
+    if (intervalMs <= 0) continue;
+    const enqueue = () => {
+      enqueueJob(type, {}, { maxAttempts: 1, delayMs }).catch((error) => logError(`scheduler_${type}_failed`, error));
+    };
+    enqueue();
+    setInterval(enqueue, intervalMs).unref();
   }
-  if (AUDIT_CHAIN_VERIFY_INTERVAL_MS > 0) {
-    enqueueAuditChainVerify().catch((e) => console.error("audit-chain-verify initial enqueue failed:", e.message));
-    setInterval(() => enqueueAuditChainVerify().catch((e) => console.error("audit-chain-verify enqueue failed:", e.message)), AUDIT_CHAIN_VERIFY_INTERVAL_MS);
-  }
-
-  setInterval(() => enqueueSweeper().catch((e) => console.error("sweeper enqueue failed:", e.message)), IDEMPOTENCY_SWEEP_INTERVAL_MS);
-  setInterval(() => enqueueExpiry().catch((e) => console.error("expiry enqueue failed:", e.message)), AUTO_EXPIRY_INTERVAL_MS);
-}
-
-async function enqueueSweeper() {
-  await enqueueJob("idempotency-sweep", {}, { maxAttempts: 1 });
-}
-
-async function enqueueExpiry() {
-  await enqueueJob("payment-auto-expiry", {}, { maxAttempts: 1 });
-}
-
-async function enqueueWatchdog() {
-  await enqueueJob("ops-watchdog", {}, { maxAttempts: 1, delayMs: 5000 });
-}
-
-async function enqueueAuditChainVerify() {
-  await enqueueJob("audit-chain-verify", {}, { maxAttempts: 1 });
 }

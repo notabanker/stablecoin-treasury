@@ -1,14 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { DOMAIN_SERVICES, serviceUrl } from "./services.mjs";
 
-export const serviceUrls = {
-  wallet: process.env.WALLET_SERVICE_URL || "http://127.0.0.1:4101",
-  policy: process.env.POLICY_SERVICE_URL || "http://127.0.0.1:4102",
-  compliance: process.env.COMPLIANCE_SERVICE_URL || "http://127.0.0.1:4103",
-  payment: process.env.PAYMENT_SERVICE_URL || "http://127.0.0.1:4104",
-  accounting: process.env.ACCOUNTING_SERVICE_URL || "http://127.0.0.1:4105",
-  reconciliation: process.env.RECONCILIATION_SERVICE_URL || "http://127.0.0.1:4106",
-  operations: process.env.OPERATIONS_SERVICE_URL || "http://127.0.0.1:4107"
-};
+export const serviceUrls = Object.fromEntries(
+  DOMAIN_SERVICES.map((service) => [service.name, serviceUrl(service)])
+);
 
 const defaultTimeoutMs = Number(process.env.SERVICE_TIMEOUT_MS || 2500);
 const defaultRetries = Number(process.env.SERVICE_RETRIES || 2);

@@ -11,8 +11,8 @@
 // fromString/fromNumeric round half-up at the 3rd decimal digit on the exact
 // string (no float round-trip) — the 3rd digit alone decides, digits beyond it
 // truncate, so pg numerics of any magnitude (even past 2^53) stay exact.
-// fromNumber, times, and divide round-trip through Number: exact only within
-// the Number-safe integer ceiling (documented, not a known bug).
+// fromNumber and times round-trip through Number: exact only within the
+// Number-safe integer ceiling (documented, not a known bug).
 
 const SCALE = 100n; // 2 decimal places → cents
 
@@ -51,11 +51,6 @@ export class Money {
     return Money.fromString(String(value));
   }
 
-  /** Create Money from cents (bigint or number). */
-  static fromCents(cents) {
-    return new Money(BigInt(cents));
-  }
-
   /** Zero. */
   static zero() {
     return new Money(0n);
@@ -77,11 +72,6 @@ export class Money {
   /** Get the amount in cents (bigint). */
   toCents() {
     return this.#cents;
-  }
-
-  /** Round to cents (idempotent — Money is already at cent precision). */
-  round() {
-    return this;
   }
 
   /** Add another Money. */
@@ -106,59 +96,8 @@ export class Money {
     throw new TypeError("factor must be a number or Money");
   }
 
-  /** Divide by a scalar. Result is rounded to cents. */
-  divide(factor) {
-    return new Money(BigInt(Math.round(Number(this.#cents) / factor)));
-  }
-
-  /** Compare to another Money. Returns -1, 0, or 1. */
-  compare(other) {
-    if (this.#cents < other.#cents) return -1;
-    if (this.#cents > other.#cents) return 1;
-    return 0;
-  }
-
-  equals(other) {
-    return this.#cents === other.#cents;
-  }
-
-  gt(other) { return this.#cents > other.#cents; }
-  gte(other) { return this.#cents >= other.#cents; }
-  lt(other) { return this.#cents < other.#cents; }
-  lte(other) { return this.#cents <= other.#cents; }
-  isZero() { return this.#cents === 0n; }
   isPositive() { return this.#cents > 0n; }
   isNegative() { return this.#cents < 0n; }
-
-  /** Return the absolute value. */
-  abs() {
-    return this.#cents < 0n ? new Money(-this.#cents) : this;
-  }
-
-  /** Return the negated value. */
-  negate() {
-    return new Money(-this.#cents);
-  }
-
-  /** Return the larger of this and other. */
-  max(other) {
-    return this.gt(other) ? this : other;
-  }
-
-  /** Return the smaller of this and other. */
-  min(other) {
-    return this.lt(other) ? this : other;
-  }
-
-  /** JSON serialization: decimal string. */
-  toJSON() {
-    return this.toString();
-  }
-
-  /** Custom inspect for console.log. */
-  [Symbol.for("nodejs.util.inspect.custom")]() {
-    return `Money(${this.toString()})`;
-  }
 }
 
 // ── Stateless helpers (drop-in for legacy roundMoney etc.) ──
@@ -196,18 +135,10 @@ export function parseMoneyInput(value) {
   return Money.fromString(clean);
 }
 
-/** Round a numeric value to 2 decimal places (legacy-compatible). Returns a number. */
+/** Round a numeric value to 2 decimal places. Returns a number. */
 export function roundMoney(value) {
   if (value instanceof Money) return value.toNumber();
   return Money.fromNumber(Number(value)).toNumber();
-}
-
-/** Format a numeric value for display, e.g. "€1,234.56". */
-export function formatMoney(value, currency = "EUR") {
-  const symbols = { EUR: "€", USD: "$", PLN: "zł", GBP: "£" };
-  const sym = symbols[currency] || currency + " ";
-  const num = typeof value === "number" ? value : Number(value);
-  return `${sym}${num.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function abs(n) {

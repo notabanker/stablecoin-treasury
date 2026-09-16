@@ -1,40 +1,22 @@
-import { query, runWithTenant } from "../../../packages/shared/db.mjs";
-import { createJsonService, httpError, ok, route } from "../../../packages/shared/http.mjs";
-import { DEFAULT_TENANT_ID, tenantIdFromHeaders } from "../../../packages/shared/tenant.mjs";
-import { validateProductionConfig } from "../../../packages/shared/config.mjs";
+import { query } from "../../../packages/shared/db.mjs";
+import { httpError, ok, route } from "../../../packages/shared/http.mjs";
+import { createDomainService } from "../../../packages/shared/service.mjs";
+import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
 import { reseedCounterparties } from "./seed.mjs";
 
 const port = Number(process.env.PORT || 4103);
 const DB = "compliance";
 
-validateProductionConfig("compliance-service");
-
-// Top-level await: the HTTP listener (created below) must not accept traffic before the schema
-// has demo data, matching the old durable-store's "seed on first boot if the file doesn't exist"
-// behavior. ES modules support this at the top level, so the import itself blocks until ready.
-// Bootstrap runs outside any request: enter the default-tenant RLS context explicitly
-// so the seeded-data existence check does not fail closed (0 rows) and reseed every boot.
-await runWithTenant(DEFAULT_TENANT_ID, bootstrap);
-
-createJsonService({
+await createDomainService({
   name: "compliance-service",
   port,
-  internalAuthRequired: true,
+  db: DB,
+  seed: { table: "compliance.counterparties", reseed: reseedCounterparties, list: listCounterparties },
   routes: [
-    route("GET", "/health", () => ok({ status: "ok", service: "compliance-service" }), { public: true }),
-    route("GET", "/ready", async () => {
-      await query(DB, "SELECT 1");
-      return ok({ status: "ready" });
-    }, { public: true }),
-    route("POST", "/reset", async ({ headers }) => {
-      const tenantId = tenantIdFromHeaders(headers);
-      await reseedCounterparties(tenantId);
-      return ok(await listCounterparties(tenantId));
-    }),
-    route("GET", "/counterparties", async ({ headers }) => ok(await listCounterparties(tenantIdFromHeaders(headers)))),
-    route("GET", "/counterparties/:id", async ({ params, headers }) => ok(await findCounterparty(params.id, tenantIdFromHeaders(headers)))),
-    route("POST", "/screen", async ({ body, headers }) => {
-      const counterparty = await findCounterparty(body.counterpartyId, tenantIdFromHeaders(headers));
+    route("GET", "/counterparties", async ({ tenantId }) => ok(await listCounterparties(tenantId))),
+    route("GET", "/counterparties/:id", async ({ params, tenantId }) => ok(await findCounterparty(params.id, tenantId))),
+    route("POST", "/screen", async ({ body, tenantId }) => {
+      const counterparty = await findCounterparty(body.counterpartyId, tenantId);
       return ok({
         counterpartyId: counterparty.id,
         provider: "Sentinel Chain Analytics",
@@ -60,11 +42,7 @@ function toApiShape(row) {
 }
 
 async function listCounterparties(tenantId = DEFAULT_TENANT_ID) {
-  const { rows } = await query(
-    DB,
-    "SELECT * FROM compliance.counterparties WHERE tenant_id = $1 ORDER BY id",
-    [tenantId]
-  );
+  const { rows } = await query(DB, "SELECT * FROM compliance.counterparties WHERE tenant_id = $1 ORDER BY id", [tenantId]);
   return rows.map(toApiShape);
 }
 
@@ -74,11 +52,4 @@ async function findCounterparty(id, tenantId = DEFAULT_TENANT_ID) {
     throw httpError(404, `counterparty ${id} not found`, "not_found");
   }
   return toApiShape(rows[0]);
-}
-
-async function bootstrap() {
-  const { rows } = await query(DB, "SELECT COUNT(*)::int AS count FROM compliance.counterparties WHERE tenant_id = $1", [DEFAULT_TENANT_ID]);
-  if (rows[0].count === 0) {
-    await reseedCounterparties();
-  }
 }

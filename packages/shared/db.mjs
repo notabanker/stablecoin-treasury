@@ -14,7 +14,7 @@ export function runWithTenant(tenantId, fn) {
   return tenantStorage.run(tenantId || null, fn);
 }
 
-export function currentTenantId() {
+function currentTenantId() {
   return tenantStorage.getStore() || null;
 }
 
@@ -24,7 +24,7 @@ async function setTenantConfig(client, tenantId) {
   await client.query("SELECT set_config('app.tenant_id', $1, true)", [String(tenantId)]);
 }
 
-export function getPool(name) {
+function getPool(name) {
   if (pools.has(name)) return pools.get(name);
   const connectionString = process.env.DATABASE_URL || "postgres://127.0.0.1:5432/treasury_dev";
   const pool = new pg.Pool({

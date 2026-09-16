@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { SERVICES } from "../packages/shared/services.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 let shuttingDown = false;
@@ -14,23 +15,10 @@ function dbUrl(role) {
   return `postgres://${role}:${serviceDbPassword}@${host}:${port}/${dbName}`;
 }
 
-const processes = [
-  ["wallet-service", "services/wallet-service/src/index.mjs", { PORT: "4101", DATABASE_URL: dbUrl("svc_wallet") }],
-  ["policy-service", "services/policy-service/src/index.mjs", { PORT: "4102", DATABASE_URL: dbUrl("svc_policy") }],
-  ["compliance-service", "services/compliance-service/src/index.mjs", { PORT: "4103", DATABASE_URL: dbUrl("svc_compliance") }],
-  ["accounting-service", "services/accounting-service/src/index.mjs", { PORT: "4105", DATABASE_URL: dbUrl("svc_accounting") }],
-  ["reconciliation-service", "services/reconciliation-service/src/index.mjs", { PORT: "4106", DATABASE_URL: dbUrl("svc_reconciliation") }],
-  ["operations-service", "services/operations-service/src/index.mjs", { PORT: "4107", DATABASE_URL: dbUrl("svc_operations") }],
-  ["payment-service", "services/payment-service/src/index.mjs", { PORT: "4104", DATABASE_URL: dbUrl("svc_payment") }],
-  ["api-gateway", "services/api-gateway/src/index.mjs", { GATEWAY_PORT: "8080", DATABASE_URL: dbUrl("svc_gateway") }],
-  ["relay-worker", "services/relay-worker/src/index.mjs", { PORT: "9101", DATABASE_URL: dbUrl("svc_relay") }],
-  ["job-worker", "services/job-worker/src/index.mjs", { PORT: "9102", DATABASE_URL: dbUrl("svc_job") }]
-];
-
-const children = processes.map(([name, script, env]) => {
-  const child = spawn(process.execPath, [script], {
+const children = SERVICES.map(({ name, path, env, port: servicePort, role }) => {
+  const child = spawn(process.execPath, [path], {
     cwd: root,
-    env: { ...process.env, ...env },
+    env: { ...process.env, [env]: String(servicePort), DATABASE_URL: dbUrl(role) },
     stdio: ["ignore", "pipe", "pipe"]
   });
 

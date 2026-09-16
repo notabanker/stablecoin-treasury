@@ -1,43 +1,28 @@
-import { query, withTransaction, runWithTenant } from "../../../packages/shared/db.mjs";
-import { createJsonService, httpError, ok, route } from "../../../packages/shared/http.mjs";
-import { DEFAULT_TENANT_ID, tenantIdFromHeaders } from "../../../packages/shared/tenant.mjs";
-import { validateProductionConfig } from "../../../packages/shared/config.mjs";
+import { query, withTransaction } from "../../../packages/shared/db.mjs";
+import { httpError, ok, route } from "../../../packages/shared/http.mjs";
+import { createDomainService } from "../../../packages/shared/service.mjs";
+import { DEFAULT_TENANT_ID } from "../../../packages/shared/tenant.mjs";
 import { assertBalanced, createPaymentJournals } from "./journals.mjs";
 import { reseedJournals } from "./seed.mjs";
 
 const port = Number(process.env.PORT || 4105);
 const DB = "accounting";
+const JOURNAL_SELECT = "SELECT * FROM accounting.journal_entries WHERE tenant_id = $1";
 
-validateProductionConfig("accounting-service");
-// Bootstrap runs outside any request: enter the default-tenant RLS context explicitly
-// so the seeded-data existence check does not fail closed (0 rows) and reseed every boot.
-await runWithTenant(DEFAULT_TENANT_ID, bootstrap);
-
-createJsonService({
+await createDomainService({
   name: "accounting-service",
   port,
-  internalAuthRequired: true,
+  db: DB,
+  seed: { table: "accounting.journal_entries", reseed: reseedJournals, list: listJournals },
   routes: [
-    route("GET", "/health", () => ok({ status: "ok", service: "accounting-service" }), { public: true }),
-    route("GET", "/ready", async () => {
-      await query(DB, "SELECT 1");
-      return ok({ status: "ready" });
-    }, { public: true }),
-    route("POST", "/reset", async ({ headers }) => {
-      const tenantId = tenantIdFromHeaders(headers);
-      await reseedJournals(tenantId);
-      return ok(await listJournals(tenantId));
-    }),
-    route("GET", "/journals", async ({ headers }) => ok(await listJournals(tenantIdFromHeaders(headers)))),
-    route("POST", "/journals/from-payment", async ({ body, headers }) => {
-      const tenantId = tenantIdFromHeaders(headers);
+    route("GET", "/journals", async ({ tenantId }) => ok(await listJournals(tenantId))),
+    route("POST", "/journals/from-payment", async ({ body, tenantId }) => {
       if (!body.payment || !body.entity || !body.asset) {
         throw httpError(422, "Payment, entity, and asset are required", "missing_context");
       }
-      const { rows: existing } = await query(DB, "SELECT * FROM accounting.journal_entries WHERE tenant_id = $1 AND payment_id = $2", [tenantId, body.payment.id]);
-      if (existing.length) {
-        return ok(existing.map(toApiShape));
-      }
+      const existing = await journalsForPayment(tenantId, body.payment.id);
+      if (existing.length) return ok(existing.map(toApiShape));
+
       const entries = createPaymentJournals(body.payment, body.wallet, body.entity, body.asset);
       // Fast-fail in the app before round-tripping to the database; the deferred constraint
       // trigger on accounting.journal_entries (0006_accounting.sql) is the actual source of
@@ -57,19 +42,13 @@ createJsonService({
         // 23505 = unique_violation on journal_entries_payment_account_uniq (0009): a concurrent
         // call already inserted this payment's batch between our existence check and our insert.
         // Treat it the same as finding the existing rows up front.
-        if (error.code === "23505") {
-          const { rows: raced } = await query(DB, "SELECT * FROM accounting.journal_entries WHERE tenant_id = $1 AND payment_id = $2", [tenantId, body.payment.id]);
-          return ok(raced.map(toApiShape));
-        }
-        throw error;
+        if (error.code !== "23505") throw error;
+        return ok((await journalsForPayment(tenantId, body.payment.id)).map(toApiShape));
       }
       return ok(entries);
     }),
-    route("POST", "/journals/export", async ({ headers }) => {
-      const tenantId = tenantIdFromHeaders(headers);
-      await query(DB, "UPDATE accounting.journal_entries SET status = 'Exported' WHERE tenant_id = $1 AND status = 'Ready'", [
-        tenantId
-      ]);
+    route("POST", "/journals/export", async ({ tenantId }) => {
+      await query(DB, "UPDATE accounting.journal_entries SET status = 'Exported' WHERE tenant_id = $1 AND status = 'Ready'", [tenantId]);
       return ok(await listJournals(tenantId));
     })
   ]
@@ -89,18 +68,12 @@ function toApiShape(row) {
   };
 }
 
-async function listJournals(tenantId = DEFAULT_TENANT_ID) {
-  const { rows } = await query(DB, "SELECT * FROM accounting.journal_entries WHERE tenant_id = $1 ORDER BY created_at DESC", [
-    tenantId
-  ]);
-  return rows.map(toApiShape);
+async function journalsForPayment(tenantId, paymentId) {
+  const { rows } = await query(DB, "SELECT * FROM accounting.journal_entries WHERE tenant_id = $1 AND payment_id = $2", [tenantId, paymentId]);
+  return rows;
 }
 
-async function bootstrap() {
-  const { rows } = await query(DB, "SELECT COUNT(*)::int AS count FROM accounting.journal_entries WHERE tenant_id = $1", [
-    DEFAULT_TENANT_ID
-  ]);
-  if (rows[0].count === 0) {
-    await reseedJournals();
-  }
+async function listJournals(tenantId = DEFAULT_TENANT_ID) {
+  const { rows } = await query(DB, `${JOURNAL_SELECT} ORDER BY created_at DESC`, [tenantId]);
+  return rows.map(toApiShape);
 }

@@ -120,55 +120,35 @@ if (wallet.balance >= initialWallet.balance) {
   throw new Error("Expected source wallet balance to decrease");
 }
 
-// --- Failure path: blocked counterparty is blocked outright ---
-const blockedCounterparty = await req("/payments", {
-  body: JSON.stringify({
-    amount: 1000,
-    counterpartyId: "cp-baltic",
-    memo: "Smoke: blocked counterparty",
-    sourceWalletId: "wal-de-eur",
-    type: "Supplier"
-  }),
-  idempotencyKey: `smoke-blocked-${Date.now()}`,
-  method: "POST"
-});
-if (blockedCounterparty.payment.status !== "Blocked") {
-  throw new Error(`Expected blocked-counterparty payment to be Blocked, got ${blockedCounterparty.payment.status}`);
+// Create a payment and assert the policy engine lands it in the expected state.
+async function createExpecting(body, expectedStatus, label) {
+  const result = await req("/payments", {
+    body: JSON.stringify(body),
+    idempotencyKey: `smoke-${label}-${Date.now()}`,
+    method: "POST"
+  });
+  if (result.payment.status !== expectedStatus) {
+    throw new Error(`Expected ${label} payment to be ${expectedStatus}, got ${result.payment.status}`);
+  }
+  return result.payment;
 }
+
+// --- Failure path: blocked counterparty is blocked outright ---
+await createExpecting({
+  amount: 1000, counterpartyId: "cp-baltic", memo: "Smoke: blocked counterparty", sourceWalletId: "wal-de-eur", type: "Supplier"
+}, "Blocked", "blocked");
 
 // --- Failure path: amount over the hard transfer limit is blocked ---
-const overLimit = await req("/payments", {
-  body: JSON.stringify({
-    amount: 800000,
-    counterpartyId: "cp-nordic",
-    memo: "Smoke: over hard transfer limit",
-    sourceWalletId: "wal-hold-eur",
-    type: "Supplier"
-  }),
-  idempotencyKey: `smoke-overlimit-${Date.now()}`,
-  method: "POST"
-});
-if (overLimit.payment.status !== "Blocked") {
-  throw new Error(`Expected over-limit payment to be Blocked, got ${overLimit.payment.status}`);
-}
+await createExpecting({
+  amount: 800000, counterpartyId: "cp-nordic", memo: "Smoke: over hard transfer limit", sourceWalletId: "wal-hold-eur", type: "Supplier"
+}, "Blocked", "overlimit");
 
 // --- Failure path: a counterparty under compliance review cannot be approved ---
-const underReview = await req("/payments", {
-  body: JSON.stringify({
-    amount: 5000,
-    counterpartyId: "cp-orion",
-    memo: "Smoke: counterparty under review",
-    sourceWalletId: "wal-nl-usd",
-    type: "Supplier"
-  }),
-  idempotencyKey: `smoke-review-${Date.now()}`,
-  method: "POST"
-});
-if (underReview.payment.status !== "Pending approval") {
-  throw new Error(`Expected under-review payment to stay Pending approval, got ${underReview.payment.status}`);
-}
+const underReview = await createExpecting({
+  amount: 5000, counterpartyId: "cp-orion", memo: "Smoke: counterparty under review", sourceWalletId: "wal-nl-usd", type: "Supplier"
+}, "Pending approval", "review");
 await assertRejects(
-  () => req(`/payments/${underReview.payment.id}/approve`, { method: "POST" }),
+  () => req(`/payments/${underReview.id}/approve`, { method: "POST" }),
   409,
   "Approving a payment to a counterparty under review should be rejected"
 );

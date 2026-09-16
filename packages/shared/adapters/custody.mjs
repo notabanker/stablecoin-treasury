@@ -1,11 +1,16 @@
+import { randomBytes } from "node:crypto";
 import { query } from "../db.mjs";
-import { randomHex } from "../data.mjs";
+
+// Uppercase hex string of the requested length, for simulated provider/chain references.
+function randomHex(length) {
+  return randomBytes(Math.ceil(length / 2)).toString("hex").slice(0, length).toUpperCase();
+}
 
 // CustodyAdapter interface — implemented by SimulatedCustodyAdapter (built-in)
 // and future per-provider implementations (sandbox rail, live custody provider, etc.).
 // All methods are async and must not throw on transient failures (the saga retries).
 
-export class CustodyAdapter {
+class CustodyAdapter {
   async getBalances(walletRef) { throw new Error("Not implemented"); }
   async submitTransfer(request) { throw new Error("Not implemented"); }
   async getTransferStatus(providerRef) { throw new Error("Not implemented"); }
@@ -13,7 +18,7 @@ export class CustodyAdapter {
 
 // SimulatedCustodyAdapter — replicas current in-process simulation exactly so the
 // full suite passes unchanged. This proves the adapter seam is pure refactor.
-export class SimulatedCustodyAdapter extends CustodyAdapter {
+class SimulatedCustodyAdapter extends CustodyAdapter {
   // Idempotency store: simulates what a real provider's API guarantees server-side -- the
   // same idempotencyKey always returns the same transfer result instead of creating a new
   // one, regardless of how many times the caller (crash-)retries submitTransfer with it.
@@ -81,7 +86,7 @@ class CrashOnceThenIdempotentAdapter extends CustodyAdapter {
 // Unknown adapter keys make the provider unusable (alert-worthy), never crash.
 const registry = new Map();
 
-export function registerAdapter(key, factory) {
+function registerAdapter(key, factory) {
   registry.set(key, factory);
 }
 
@@ -129,11 +134,6 @@ const breakers = new Map();
 
 export function breakerState(providerId) {
   return breakers.get(providerId) || { state: "closed", failures: 0, openedAt: 0 };
-}
-
-export function breakerStateForMetrics(providerId) {
-  const b = breakerState(providerId);
-  return { state: b.state, failures: b.failures };
 }
 
 export async function withBreaker(providerId, fn) {
