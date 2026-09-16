@@ -143,6 +143,7 @@ function renderTopbar() {
       </div>
     </header>
     ${renderStaleBanner()}
+    ${renderDegradedBanner()}
   `;
 }
 
@@ -151,6 +152,22 @@ function renderStaleBanner() {
   return `
     <div class="stale-banner" role="alert">
       <span>Showing data from ${escapeHtml(formatDateTime(state.data.lastUpdated))}. The last refresh failed at ${escapeHtml(formatDateTime(state.refreshFailedAt))}.</span>
+      ${button("Retry refresh", "refresh", "", "secondary")}
+    </div>
+  `;
+}
+
+// The gateway answers GET /api/state with 200 + `degraded: [...]` when a domain service is
+// unreachable, instead of failing the whole read. Without this banner that outage is
+// indistinguishable from an empty desk: the affected slices come back as empty collections and
+// nothing else on screen changes. The gateway lists a service once per slice it owns, so
+// dedupe before showing it.
+function renderDegradedBanner() {
+  const degraded = [...new Set(state.data?.degraded || [])].sort();
+  if (!degraded.length) return "";
+  return `
+    <div class="stale-banner" role="alert">
+      <span>Incomplete data: ${escapeHtml(degraded.join(", "))} unreachable. Figures that depend on ${degraded.length === 1 ? "it" : "them"} are missing, not zero.</span>
       ${button("Retry refresh", "refresh", "", "secondary")}
     </div>
   `;
@@ -182,6 +199,7 @@ export {
   renderSidebarStatus,
   renderTopbar,
   renderStaleBanner,
+  renderDegradedBanner,
   viewTitle,
   renderActiveView
 };

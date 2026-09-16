@@ -5,8 +5,11 @@ import { startStack } from "../helpers/stack.mjs";
 
 // Epic 2.1: Role isolation — verify each service role cannot access foreign schemas.
 // Uses direct pg connections with per-role credentials to query the test database.
-// One stack is shared by the whole file: every test is a read or a deliberately-failing
-// write, so no test depends on isolated mutated state.
+// One stack is shared by the whole file. Every test is a read or a deliberately-failing write
+// except "jobs role can INSERT into platform.jobs", whose row is a real commit: it stays for the
+// rest of the file and the running job-worker retries it to dead-letter as an unknown type.
+// Nothing here asserts on job or alert state, so that is inert -- but a test added to this file
+// that does must not assume a clean platform.jobs.
 
 describe("role isolation", () => {
   let stack;

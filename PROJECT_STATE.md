@@ -60,6 +60,7 @@ infrastructure are not in place. Do not claim production readiness anywhere.
 | One external transfer per payment across crash/retry | `provider_submissions` + idempotency key | `provider-crash-safety.test.mjs` |
 | Wallet debit exactly once under parallel execute/retry | idempotency keys + `FOR UPDATE` | concurrency suite |
 | Demo reset is tenant-scoped and prod-gated | reset functions + `ALLOW_DEMO_RESET` | `prod-reset.test.mjs`, `reset-seed-guard.test.mjs` |
+| A downstream outage degrades `/api/state` visibly, never silently | gateway `degraded[]` + web degraded banner | `state-degraded.test.mjs` |
 
 ## Verification Commands
 
