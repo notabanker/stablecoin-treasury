@@ -5,22 +5,10 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { runMigrations } from "../../db/scripts/migrate.mjs";
+import { SERVICES } from "../../packages/shared/services.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const adminUrl = process.env.DATABASE_ADMIN_URL || "postgres://127.0.0.1:5432/postgres";
-
-const serviceDefs = [
-  ["wallet", "services/wallet-service/src/index.mjs", "PORT"],
-  ["policy", "services/policy-service/src/index.mjs", "PORT"],
-  ["compliance", "services/compliance-service/src/index.mjs", "PORT"],
-  ["accounting", "services/accounting-service/src/index.mjs", "PORT"],
-  ["reconciliation", "services/reconciliation-service/src/index.mjs", "PORT"],
-  ["operations", "services/operations-service/src/index.mjs", "PORT"],
-  ["payment", "services/payment-service/src/index.mjs", "PORT"],
-  ["gateway", "services/api-gateway/src/index.mjs", "GATEWAY_PORT"],
-  ["relay", "services/relay-worker/src/index.mjs", "PORT"],
-  ["job", "services/job-worker/src/index.mjs", "PORT"]
-];
 
 // Each test file gets a fresh module (and thus a fresh nextPortBase), but a single process runs
 // all test files so the module is shared. Use a hash of PID + time to stagger port ranges and
@@ -68,37 +56,29 @@ async function dropDatabase(name) {
   }
 }
 
+// Start a stack for a test with the ambient AUTH_REQUIRED forced when requested, and always
+// restore it (and stop the stack) when the test ends. Leaving authRequired undefined keeps the
+// current ambient value, for tests that rely on the environment they were started with.
+export async function startStackFor(t, { authRequired, extraEnv = {}, verbose = false } = {}) {
+  const previousAuthRequired = process.env.AUTH_REQUIRED;
+  if (authRequired === true) process.env.AUTH_REQUIRED = "true";
+  else if (authRequired === false) delete process.env.AUTH_REQUIRED;
+  const stack = await startStack({ verbose, extraEnv });
+  t.after(async () => {
+    if (previousAuthRequired === undefined) delete process.env.AUTH_REQUIRED;
+    else process.env.AUTH_REQUIRED = previousAuthRequired;
+    await stack.stop();
+  });
+  return stack;
+}
+
 export async function startStack({ verbose = false, extraEnv = {}, logCaptureMax = 80 } = {}) {
   const portBase = await allocatePortBase();
-  const ports = {
-    wallet: portBase + 1,
-    policy: portBase + 2,
-    compliance: portBase + 3,
-    accounting: portBase + 5,
-    reconciliation: portBase + 6,
-    operations: portBase + 7,
-    payment: portBase + 4,
-    gateway: portBase,
-    relay: portBase + 8,
-    job: portBase + 9
-  };
+  // Port offsets follow the canonical service order (gateway at the base port).
+  const ports = Object.fromEntries(SERVICES.map(({ name }, index) => [name, portBase + index]));
   const database = await createTestDatabase();
 
   const serviceDbPassword = process.env.SERVICE_DB_PASSWORD || "service-dev-password";
-
-  // Map each service to its Postgres role.
-  const serviceRoles = {
-    wallet: "svc_wallet",
-    policy: "svc_policy",
-    compliance: "svc_compliance",
-    accounting: "svc_accounting",
-    reconciliation: "svc_reconciliation",
-    operations: "svc_operations",
-    payment: "svc_payment",
-    gateway: "svc_gateway",
-    relay: "svc_relay",
-    job: "svc_job"
-  };
 
   // Build the admin URL parts.
   const adminUrlObj = new URL(database.url);
@@ -142,12 +122,11 @@ export async function startStack({ verbose = false, extraEnv = {}, logCaptureMax
     SERVICE_RETRIES: "1"
   };
 
-  const children = serviceDefs.map(([name, script, portEnvKey]) => {
+  const children = SERVICES.map(({ name, path, env, role }) => {
     const logs = [];
-    const roleUrl = roleDbUrl(serviceRoles[name] || "svc_gateway");
-    const child = spawn(process.execPath, [script], {
+    const child = spawn(process.execPath, [path], {
       cwd: root,
-      env: { ...sharedEnv, [portEnvKey]: String(ports[name]), DATABASE_URL: roleUrl },
+      env: { ...sharedEnv, [env]: String(ports[name]), DATABASE_URL: roleDbUrl(role) },
       stdio: ["ignore", verbose ? "inherit" : "pipe", verbose ? "inherit" : "pipe"]
     });
     if (!verbose) {
@@ -177,7 +156,6 @@ export async function startStack({ verbose = false, extraEnv = {}, logCaptureMax
     databaseName: database.name,
     // Exposed for failure-injection tests
     _children: children,
-    _serviceDefs: serviceDefs,
     _env: sharedEnv,
     _root: root,
     async stop() {

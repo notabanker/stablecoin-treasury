@@ -1,61 +1,25 @@
 import { createHmac } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import pg from "pg";
+import { DEFAULT_TENANT_ID, api, waitFor, waitForPaymentStatus } from "../helpers/api.mjs";
+import { adminClient } from "../helpers/db.mjs";
 import { startStack } from "../helpers/stack.mjs";
 
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "sandbox-webhook-secret";
-const TENANT_1 = "00000000-0000-0000-0000-000000000001";
-
-// Direct DB access to the stack's throwaway database (bypasses RLS as the owner).
-function adminDbUrl(stack) {
-  const url = new URL(process.env.DATABASE_ADMIN_URL || "postgres://127.0.0.1:5432/postgres");
-  url.pathname = `/${stack.databaseName}`;
-  return url.toString();
-}
 
 function reconApi(stack, path, options = {}) {
   return fetch(`http://127.0.0.1:${stack.ports.reconciliation}${path}`, {
     ...options,
-    headers: { "Content-Type": "application/json", "X-Tenant-Id": TENANT_1, ...(options.headers || {}) }
+    headers: { "Content-Type": "application/json", "X-Tenant-Id": DEFAULT_TENANT_ID, ...(options.headers || {}) }
   });
 }
 
 async function waitForStatementLines(stack, statementId, { matched, exception }) {
-  const deadline = Date.now() + 15000;
-  while (Date.now() < deadline) {
+  return waitFor(async () => {
     const res = await reconApi(stack, "/statements");
     const statement = (await res.json()).find((s) => s.id === statementId);
-    if (statement && statement.matchedCount === matched && statement.exceptionCount === exception) {
-      return statement;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 300));
-  }
-  throw new Error(`statement ${statementId} did not reach matched=${matched} exception=${exception} in time`);
-}
-
-async function waitForPaymentStatus(stack, paymentId, status) {
-  const deadline = Date.now() + 15000;
-  while (Date.now() < deadline) {
-    const state = await api(stack.baseUrl, "/state");
-    const payment = state.data.payments?.find((p) => p.id === paymentId);
-    if (payment?.status === status) return payment;
-    if (payment?.status === "Failed" || payment?.status === "Blocked") {
-      throw new Error(`payment ${paymentId} ended ${payment.status}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
-  throw new Error(`payment ${paymentId} did not reach ${status} in time`);
-}
-
-async function api(baseUrl, path, options = {}) {
-  const response = await fetch(`${baseUrl}/api${path}`, {
-    ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) }
-  });
-  const text = await response.text();
-  const data = text ? JSON.parse(text) : null;
-  return { status: response.status, data };
+    return statement && statement.matchedCount === matched && statement.exceptionCount === exception ? statement : null;
+  }, { timeoutMs: 15000, intervalMs: 300, label: `statement ${statementId} matched=${matched} exception=${exception}` });
 }
 
 // The signature is computed over the exact raw request bytes. The body is
@@ -170,13 +134,13 @@ test("settled webhook triggers statement matching for the referenced payment", a
   // The provider assigns the ref at submission time; the saga reuses a pre-set
   // provider_ref, so executing now gives the payment exactly the ref the webhook
   // will confirm later.
-  const admin = new pg.Client({ connectionString: adminDbUrl(stack) });
+  const admin = adminClient(stack);
   await admin.connect();
   await admin.query("UPDATE payment.payments SET provider_ref = $1 WHERE id = $2", [providerRef, paymentId]);
   await admin.end();
 
   await api(stack.baseUrl, `/payments/${paymentId}/execute`, { method: "POST" });
-  const settled = await waitForPaymentStatus(stack, paymentId, "Settled");
+  const settled = await waitForPaymentStatus(stack.baseUrl, paymentId, "Settled", undefined, 15000);
   assert.equal(settled.providerRef, providerRef, "payment must carry the ref the webhook confirms");
 
   const payload = { eventId: "f5-settled-1", eventType: "transfer.settled", paymentRef: providerRef };
@@ -197,7 +161,7 @@ test("settled webhook triggers statement matching for the referenced payment", a
 
   // Exactly one matched line, and exactly one Matched row for the payment — the
   // saga's own confirm row, which the statement match must not duplicate.
-  const finalClient = new pg.Client({ connectionString: adminDbUrl(stack) });
+  const finalClient = adminClient(stack);
   await finalClient.connect();
   const { rows: lineRows } = await finalClient.query(
     "SELECT match_status FROM reconciliation.statement_lines WHERE statement_id = $1",
@@ -205,7 +169,7 @@ test("settled webhook triggers statement matching for the referenced payment", a
   );
   const { rows: matchRows } = await finalClient.query(
     "SELECT COUNT(*)::int AS c FROM reconciliation.reconciliation_rows WHERE tenant_id = $1 AND payment_id = $2 AND issue = 'Matched'",
-    [TENANT_1, paymentId]
+    [DEFAULT_TENANT_ID, paymentId]
   );
   await finalClient.end();
   assert.deepEqual(lineRows.map((r) => r.match_status), ["matched"]);

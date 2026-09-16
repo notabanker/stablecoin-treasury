@@ -2,22 +2,13 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import pg from "pg";
+import { api, sleep, waitFor } from "../helpers/api.mjs";
+import { withDb } from "../helpers/db.mjs";
 import { startStack } from "../helpers/stack.mjs";
 
 const execFileAsync = promisify(execFile);
 const TENANT_1 = "00000000-0000-0000-0000-000000000001";
 const CHAIN_ALERT_TITLE = "Audit chain integrity violation";
-
-async function withDb(stack, fn) {
-  const client = new pg.Client({ connectionString: stack._env.DATABASE_URL });
-  await client.connect();
-  try {
-    return await fn(client);
-  } finally {
-    await client.end();
-  }
-}
 
 // Run the standalone verifier script against the stack's throwaway database so the CLI
 // (exit codes included) is what gets proven, not just the underlying library function.
@@ -47,9 +38,8 @@ test("audit chain stays valid across every insert path including demo reset", as
   t.after(() => stack.stop());
 
   // Path 1: gateway emitSecurityAudit (login success)
-  const login = await fetch(`${stack.baseUrl}/api/login`, {
+  const login = await api(stack.baseUrl, "/login", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123", client: "api" })
   });
   assert.equal(login.status, 200);
@@ -62,28 +52,23 @@ test("audit chain stays valid across every insert path including demo reset", as
   // is an FK to outbox_events, so this path can only be exercised by a REAL relayed event:
   // creating a payment makes the payment service write an audit.event_recorded outbox row,
   // which the relay delivers to operations /audit with X-Event-Id.
-  const payment = await fetch(`${stack.baseUrl}/api/payments`, {
+  const payment = await api(stack.baseUrl, "/payments", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Idempotency-Key": "audit-chain-path3" },
+    headers: { "Idempotency-Key": "audit-chain-path3" },
     body: JSON.stringify({ amount: 100, counterpartyId: "cp-nordic", sourceWalletId: "wal-de-eur", type: "Supplier" })
   });
   assert.equal(payment.status, 200);
-  const relayed = await withDb(stack, async (db) => {
-    const deadline = Date.now() + 10000;
-    while (Date.now() < deadline) {
-      const { rows } = await db.query(
-        "SELECT id FROM operations.audit_events WHERE action LIKE 'Payment%' LIMIT 1"
-      );
-      if (rows[0]) return rows[0];
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-    return null;
-  });
+  const relayed = await waitFor(() => withDb(stack, async (db) => {
+    const { rows } = await db.query(
+      "SELECT id FROM operations.audit_events WHERE action LIKE 'Payment%' LIMIT 1"
+    );
+    return rows[0] || null;
+  }), { timeoutMs: 10000, intervalMs: 250, label: "relay to deliver the payment audit event" });
   assert.ok(relayed, "relay must deliver the payment audit event through the inbox-dedup path");
 
   // Path 4: demo reset — deletes tenant-1 audit rows and reseeds them through the chained
   // insert; the tenant chain must restart cleanly at genesis.
-  const reset = await fetch(`${stack.baseUrl}/api/reset`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  const reset = await api(stack.baseUrl, "/reset", { method: "POST", body: "{}" });
   assert.equal(reset.status, 200);
 
   // Append after the reseed to prove the rebuilt chain accepts new links.
@@ -209,29 +194,23 @@ test("audit-chain-verify job raises one deduped alert on break and closes it whe
   });
 
   // The scheduled verify job must notice the break and raise an alert.
-  const deadline = Date.now() + 15000;
-  let open = [];
-  while (Date.now() < deadline) {
-    open = await openAlerts();
-    if (open.length > 0) break;
-    await new Promise((resolve) => setTimeout(resolve, 300));
-  }
+  const open = await waitFor(async () => {
+    const rows = await openAlerts();
+    return rows.length > 0 ? rows : null;
+  }, { timeoutMs: 15000, intervalMs: 300, label: "chain-break alert" });
   assert.equal(open.length, 1, "chain break must raise exactly one open alert");
 
   // Dedupe: after several more verify cycles there is still exactly one open alert.
-  await new Promise((resolve) => setTimeout(resolve, 2000));
-  open = await openAlerts();
-  assert.equal(open.length, 1, "repeated verification of a persisting break must not stack alerts");
+  await sleep(2000);
+  assert.equal((await openAlerts()).length, 1, "repeated verification of a persisting break must not stack alerts");
 
   // Heal the chain: the next verify cycle must close the alert.
   await withDb(stack, (db) =>
     db.query("UPDATE operations.audit_events SET detail = $1 WHERE id = $2", [tampered.detail, tampered.id])
   );
-  const closeDeadline = Date.now() + 15000;
-  while (Date.now() < closeDeadline) {
-    open = await openAlerts();
-    if (open.length === 0) break;
-    await new Promise((resolve) => setTimeout(resolve, 300));
-  }
-  assert.equal(open.length, 0, "healed chain must close the open alert");
+  await waitFor(async () => {
+    const openRows = await openAlerts();
+    return openRows.length === 0 ? true : null;
+  }, { timeoutMs: 15000, intervalMs: 300, label: "open alert to close" });
+  assert.equal((await openAlerts()).length, 0, "healed chain must close the open alert");
 });

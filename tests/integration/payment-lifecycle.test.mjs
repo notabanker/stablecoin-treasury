@@ -1,15 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { api, waitFor } from "../helpers/api.mjs";
 import { startStack } from "../helpers/stack.mjs";
 
-async function api(baseUrl, path, options = {}) {
-  const response = await fetch(`${baseUrl}/api${path}`, {
-    ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) }
-  });
-  const text = await response.text();
-  const data = text ? JSON.parse(text) : null;
-  return { status: response.status, data };
+// Local settle helper: resolves the full /api/state snapshot once the payment reaches a
+// terminal-ish status, so tests can assert on payments, wallets, journals and recon together.
+async function waitForSettlement(baseUrl, paymentId, timeoutMs = 10000) {
+  return waitFor(async () => {
+    const state = await api(baseUrl, "/state");
+    const payment = state.data.payments?.find((p) => p.id === paymentId);
+    return payment && ["Settled", "Failed", "Blocked"].includes(payment.status) ? state : null;
+  }, { timeoutMs, label: `payment ${paymentId} to settle` });
 }
 
 test("full payment lifecycle settles with balanced journals and a matched recon row", async (t) => {
@@ -107,23 +108,6 @@ test("resuming execute from Executing does not double-debit the wallet", async (
 
   assert.equal(walletAfterFirst.balance, walletAfterSecond.balance);
 });
-
-async function waitForSettlement(baseUrl, paymentId, timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const state = await api(baseUrl, "/state");
-    const payment = state.data.payments?.find((p) => p.id === paymentId);
-    if (payment && (payment.status === "Settled" || payment.status === "Failed" || payment.status === "Blocked")) {
-      return state;
-    }
-    await sleep(200);
-  }
-  throw new Error(`Payment ${paymentId} did not settle within ${timeoutMs}ms`);
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 test("blocked counterparty payments never reach execution", async (t) => {
   const stack = await startStack();

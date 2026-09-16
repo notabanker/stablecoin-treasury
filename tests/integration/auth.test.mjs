@@ -1,0 +1,326 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { api, extractCookie, login, sleep } from "../helpers/api.mjs";
+import { withDb } from "../helpers/db.mjs";
+import { startStackFor } from "../helpers/stack.mjs";
+
+test("browser login omits session token from JSON; API client opt-in returns it (Q7)", async (t) => {
+  const stack = await startStackFor(t, { authRequired: true });
+
+  const browserLogin = await api(stack.baseUrl, "/login", {
+    method: "POST",
+    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123" })
+  });
+  assert.equal(browserLogin.status, 200);
+  assert.equal(browserLogin.data.session?.token, undefined, "browser login must not expose session token in body");
+  assert.ok(browserLogin.data.session?.csrfToken, "csrf still returned for double-submit");
+  assert.ok(browserLogin.data.user?.id);
+
+  const apiLogin = await login(stack.baseUrl, "marta@vega-industries.com");
+  assert.equal(apiLogin.status, 200);
+  assert.ok(apiLogin.data.session?.token, "client:api must still receive bearer token for scripts/tests");
+});
+
+test("tenant 2 second user Maria can log in with demo123 (M6 four-eyes demo)", async (t) => {
+  const stack = await startStackFor(t, { authRequired: true });
+
+  const mariaLogin = await login(stack.baseUrl, "maria@nordic.corp");
+  assert.equal(mariaLogin.status, 200, "Maria's scrypt password hash must verify demo123");
+  assert.equal(mariaLogin.data.user?.email, "maria@nordic.corp");
+});
+
+test("dev auth mode honors a supplied session tenant instead of forcing the default tenant", async (t) => {
+  const stack = await startStackFor(t, { authRequired: false });
+
+  const tenant2Login = await login(stack.baseUrl, "admin@nordic-holdings.com");
+  assert.equal(tenant2Login.status, 200);
+
+  const tenant2State = await api(stack.baseUrl, "/state", {
+    headers: { Authorization: `Bearer ${tenant2Login.data.session.token}` }
+  });
+
+  assert.equal(tenant2State.status, 200);
+  assert.equal(tenant2State.data.currentUser.tenantId, "00000000-0000-0000-0000-000000000002");
+  assert.ok(tenant2State.data.wallets.some((wallet) => wallet.id === "wal-nordic-eur" && wallet.balance > 0));
+  assert.ok(!tenant2State.data.wallets.some((wallet) => wallet.id === "wal-de-eur"));
+});
+
+// GAP 1 — Logout CSRF enforcement
+test("cookie-authenticated POST /api/logout without X-Csrf-Token returns 403", async (t) => {
+  const stack = await startStackFor(t, { authRequired: true });
+
+  const loginRes = await login(stack.baseUrl, "marta@vega-industries.com");
+  assert.equal(loginRes.status, 200);
+  const sessionCookie = extractCookie(loginRes.setCookie, "session");
+  assert.ok(sessionCookie, "login should set session cookie");
+
+  // Logout without CSRF header
+  const noCsrf = await api(stack.baseUrl, "/logout", {
+    method: "POST",
+    headers: { Cookie: `session=${sessionCookie}` }
+  });
+  assert.equal(noCsrf.status, 403);
+  assert.equal(noCsrf.data.error, "csrf_invalid");
+});
+
+test("cookie-authenticated POST /api/logout with correct X-Csrf-Token returns 200", async (t) => {
+  const stack = await startStackFor(t, { authRequired: true });
+
+  const loginRes = await login(stack.baseUrl, "marta@vega-industries.com");
+  const sessionCookie = extractCookie(loginRes.setCookie, "session");
+  const csrfToken = extractCookie(loginRes.setCookie, "csrf");
+  assert.ok(sessionCookie && csrfToken, "login should set both cookies");
+
+  const valid = await api(stack.baseUrl, "/logout", {
+    method: "POST",
+    headers: {
+      Cookie: `session=${sessionCookie}; csrf=${csrfToken}`,
+      "X-Csrf-Token": csrfToken
+    }
+  });
+  assert.equal(valid.status, 200);
+  assert.ok(valid.setCookie.some((cookie) => cookie.startsWith("session=;") && cookie.includes("Max-Age=0")));
+  assert.ok(valid.setCookie.some((cookie) => cookie.startsWith("csrf=;") && cookie.includes("Max-Age=0")));
+});
+
+test("secure mode uses __Host cookies and logout clears them with Secure", async (t) => {
+  const stack = await startStackFor(t, {
+    authRequired: true,
+    extraEnv: { SESSION_COOKIE_SECURE: "true" }
+  });
+
+  const loginRes = await login(stack.baseUrl, "marta@vega-industries.com");
+  assert.equal(loginRes.status, 200);
+  const sessionCookie = extractCookie(loginRes.setCookie, "__Host-session");
+  const csrfToken = extractCookie(loginRes.setCookie, "__Host-csrf");
+  assert.ok(sessionCookie && csrfToken, "secure mode should set __Host-prefixed cookies");
+  assert.ok(loginRes.setCookie.some((cookie) => cookie.startsWith("__Host-session=") && cookie.includes("Secure")));
+  assert.ok(loginRes.setCookie.some((cookie) => cookie.startsWith("__Host-csrf=") && cookie.includes("Secure")));
+
+  const logoutRes = await api(stack.baseUrl, "/logout", {
+    method: "POST",
+    headers: {
+      Cookie: `__Host-session=${sessionCookie}; __Host-csrf=${csrfToken}`,
+      "X-Csrf-Token": csrfToken
+    }
+  });
+  assert.equal(logoutRes.status, 200);
+  assert.ok(logoutRes.setCookie.some((cookie) => cookie.startsWith("__Host-session=;") && cookie.includes("Max-Age=0") && cookie.includes("Secure")));
+  assert.ok(logoutRes.setCookie.some((cookie) => cookie.startsWith("__Host-csrf=;") && cookie.includes("Max-Age=0") && cookie.includes("Secure")));
+});
+
+test("session idle timeout expires inactive cookie sessions", async (t) => {
+  const stack = await startStackFor(t, {
+    authRequired: true,
+    extraEnv: {
+      SESSION_IDLE_TTL_MINUTES: "0.01",
+      SESSION_ABSOLUTE_TTL_HOURS: "1"
+    }
+  });
+
+  const loginRes = await login(stack.baseUrl, "marta@vega-industries.com");
+  assert.equal(loginRes.status, 200);
+  const sessionCookie = extractCookie(loginRes.setCookie, "session");
+  assert.ok(sessionCookie);
+
+  await sleep(900);
+
+  const state = await api(stack.baseUrl, "/state", {
+    headers: { Cookie: `session=${sessionCookie}` }
+  });
+  assert.equal(state.status, 401);
+  assert.equal(state.data.error, "unauthorized");
+});
+
+// GAP 2 — Null-CSRF session cannot mutate
+test("cookie-authenticated POST /api/payments with null csrf_token is rejected by DB NOT NULL constraint", async (t) => {
+  const stack = await startStackFor(t, { authRequired: true });
+
+  const loginRes = await login(stack.baseUrl, "marta@vega-industries.com");
+  const sessionCookie = extractCookie(loginRes.setCookie, "session");
+  assert.ok(sessionCookie);
+
+  // The DB NOT NULL constraint on csrf_token (migration 0030) rejects nulling
+  // the column — a legacy attack vector that is now closed at the schema level
+  // in addition to the runtime check.
+  await withDb(stack, async (client) => {
+    await assert.rejects(
+      () => client.query("UPDATE identity.sessions SET csrf_token = NULL WHERE token = $1", [sessionCookie]),
+      /null value|not-null|violates not-null/,
+      "DB must reject null csrf_token update"
+    );
+    await client.query("UPDATE identity.sessions SET csrf_token = '' WHERE token = $1", [sessionCookie]);
+  });
+
+  // Empty-string csrf_token: the runtime check (verifyCsrf) still rejects it
+  // even though the DB allowed the empty-string update.
+  const mutation = await api(stack.baseUrl, "/payments", {
+    method: "POST",
+    headers: {
+      Cookie: `session=${sessionCookie}`
+    },
+    body: JSON.stringify({ amount: 100, counterpartyId: "cp-nordic", sourceWalletId: "wal-de-eur", type: "Supplier" })
+  });
+  assert.equal(mutation.status, 403);
+  assert.equal(mutation.data.error, "csrf_invalid");
+});
+
+// GAP 3 — Tenant-scoped failed login audit
+test("failed login for known tenant-2 email writes audit event under tenant 2", async (t) => {
+  const stack = await startStackFor(t, { authRequired: true });
+
+  // Failed login for tenant-2 user (wrong password)
+  await api(stack.baseUrl, "/login", {
+    method: "POST",
+    body: JSON.stringify({ email: "admin@nordic-holdings.com", password: "wrong-password" })
+  });
+
+  // Check audit events are written under tenant 2
+  const rows = await withDb(stack, async (client) => {
+    const { rows } = await client.query(
+      "SELECT * FROM operations.audit_events WHERE action = 'Login failed' AND actor LIKE $1 ORDER BY at DESC LIMIT 1",
+      ['%admin@nordic-holdings.com%']
+    );
+    return rows;
+  });
+
+  assert.ok(rows[0], "failed login should create an audit event");
+  assert.equal(rows[0].tenant_id, "00000000-0000-0000-0000-000000000002",
+    "failed login audit should be under tenant 2, not tenant 1");
+});
+
+test("lockout for known tenant-2 email writes Login lockout audit event under tenant 2", async (t) => {
+  const stack = await startStackFor(t, {
+    authRequired: true,
+    extraEnv: { LOGIN_RATE_LIMIT_MAX: "2" }
+  });
+
+  const attempt = () => api(stack.baseUrl, "/login", {
+    method: "POST",
+    body: JSON.stringify({ email: "admin@nordic-holdings.com", password: "wrong-password" })
+  });
+
+  await attempt(); // failure 1
+  await attempt(); // failure 2 → locks out
+  const locked = await attempt(); // rejected by lockout → writes Login lockout audit row
+  assert.equal(locked.status, 429);
+
+  const rows = await withDb(stack, async (client) => {
+    const { rows } = await client.query(
+      "SELECT * FROM operations.audit_events WHERE action = 'Login lockout' AND actor LIKE $1 ORDER BY at DESC LIMIT 1",
+      ['%admin@nordic-holdings.com%']
+    );
+    return rows;
+  });
+
+  assert.ok(rows[0], "lockout should create an audit event");
+  assert.equal(rows[0].tenant_id, "00000000-0000-0000-0000-000000000002",
+    "lockout audit should be under tenant 2, not tenant 1");
+});
+
+test("failed login for unknown email writes audit event under the default platform tenant", async (t) => {
+  const stack = await startStackFor(t, { authRequired: true });
+
+  const res = await api(stack.baseUrl, "/login", {
+    method: "POST",
+    body: JSON.stringify({ email: "ghost@nowhere.example", password: "wrong-password" })
+  });
+  assert.equal(res.status, 401, "unknown email must return the same 401 as a wrong password");
+
+  const rows = await withDb(stack, async (client) => {
+    const { rows } = await client.query(
+      "SELECT * FROM operations.audit_events WHERE action = 'Login failed' AND actor LIKE $1 ORDER BY at DESC LIMIT 1",
+      ['%ghost@nowhere.example%']
+    );
+    return rows;
+  });
+
+  assert.ok(rows[0], "unknown-email failed login should create an audit event");
+  assert.equal(rows[0].tenant_id, "00000000-0000-0000-0000-000000000001",
+    "unknown-email failed login audit falls back to the default platform tenant");
+});
+
+// GAP 4 — Rate limiter uses trusted forwarded IP
+test("rate limiter buckets differ by X-Forwarded-For when TRUST_PROXY_HEADERS=true", async (t) => {
+  const stack = await startStackFor(t, {
+    extraEnv: {
+      TRUST_PROXY_HEADERS: "true",
+      RATE_LIMIT_WINDOW_MS: "10000",
+      RATE_LIMIT_MAX: "2",
+      STATE_RATE_LIMIT_MAX: "2"
+    }
+  });
+
+  // Three requests from three different X-Forwarded-For IPs should not share one bucket
+  const request = (fwdIp) => api(stack.baseUrl, "/docs", {
+    headers: { "X-Forwarded-For": fwdIp }
+  });
+
+  const r1 = await request("192.0.2.1");
+  assert.equal(r1.status, 200, "first request from IP1 should succeed");
+
+  const r2 = await request("192.0.2.2");
+  assert.equal(r2.status, 200, "second request from IP2 should succeed (different bucket)");
+
+  const r3 = await request("192.0.2.3");
+  assert.equal(r3.status, 200, "third request from IP3 should succeed (different bucket)");
+});
+
+test("rate limiter ignores X-Forwarded-For when TRUST_PROXY_HEADERS is not enabled", async (t) => {
+  const stack = await startStackFor(t, {
+    extraEnv: {
+      RATE_LIMIT_WINDOW_MS: "10000",
+      RATE_LIMIT_MAX: "2"
+    }
+  });
+
+  const request = (fwdIp) => api(stack.baseUrl, "/docs", {
+    headers: { "X-Forwarded-For": fwdIp }
+  });
+
+  const r1 = await request("192.0.2.1");
+  assert.equal(r1.status, 200);
+
+  const r2 = await request("192.0.2.2");
+  assert.equal(r2.status, 200);
+
+  // Third request with spoofed IP should share the same socket-IP bucket → 429
+  const r3 = await request("192.0.2.3");
+  assert.equal(r3.status, 429, "spoofed X-Forwarded-For should not bypass rate limit");
+  assert.equal(r3.data.error, "rate_limited");
+});
+
+// Epic 1.3 — Internal service auth enforcement: unsigned direct calls to internal
+// services must return 401 when INTERNAL_AUTH_REQUIRED=true.
+test("unsigned direct requests to internal services return 401 with internal auth required", async (t) => {
+  const stack = await startStackFor(t, {
+    extraEnv: {
+      INTERNAL_AUTH_REQUIRED: "true",
+      INTERNAL_SERVICE_TOKEN: "test-internal-token-abc123"
+    }
+  });
+
+  // Direct unsigned call to wallet service
+  const walletUrl = `http://127.0.0.1:${stack.ports.wallet}/wallets`;
+  const walletRes = await fetch(walletUrl, {
+    headers: { "X-Tenant-Id": "00000000-0000-0000-0000-000000000002" }
+  });
+  assert.equal(walletRes.status, 401, "unsigned wallet request should be 401");
+  const walletBody = await walletRes.json();
+  assert.equal(walletBody.error, "internal_auth_required");
+
+  // Direct unsigned call to payment service
+  const paymentUrl = `http://127.0.0.1:${stack.ports.payment}/payments`;
+  const paymentRes = await fetch(paymentUrl, {
+    headers: { "X-Tenant-Id": "00000000-0000-0000-0000-000000000002" }
+  });
+  assert.equal(paymentRes.status, 401, "unsigned payment request should be 401");
+
+  // Health endpoint should remain public
+  const healthRes = await fetch(`http://127.0.0.1:${stack.ports.wallet}/health`);
+  assert.equal(healthRes.status, 200, "health endpoint must be public");
+
+  // Gateway-mediated request should succeed (service-client signs the request)
+  const stateRes = await fetch(`${stack.baseUrl}/api/state`);
+  assert.equal(stateRes.status, 200, "gateway request should succeed with signed internal calls");
+});

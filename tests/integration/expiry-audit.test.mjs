@@ -1,45 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import pg from "pg";
+import { DEFAULT_TENANT_ID, api, waitFor } from "../helpers/api.mjs";
+import { withDb } from "../helpers/db.mjs";
 import { startStack } from "../helpers/stack.mjs";
-import { DEFAULT_TENANT_ID } from "../../packages/shared/tenant.mjs";
 
 // Audit finding #5: payment-auto-expiry used to UPDATE payments to Cancelled with no
 // audit/outbox event — the one state transition invisible to the hash chain. Now it must
 // emit one chained audit.event_recorded per expired payment.
-
-async function api(baseUrl, path, options = {}) {
-  const response = await fetch(`${baseUrl}/api${path}`, {
-    ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) }
-  });
-  const text = await response.text();
-  const data = text ? JSON.parse(text) : null;
-  return { status: response.status, data };
-}
-
-// Admin superuser connection to the stack's fresh database (same pattern as saga.test.mjs):
-// RLS policies do not apply to superusers, so no app.tenant_id SET is needed.
-async function withDb(stack, fn) {
-  const client = new pg.Client({ connectionString: databaseUrl(stack.databaseName) });
-  await client.connect();
-  try {
-    return await fn(client);
-  } finally {
-    await client.end();
-  }
-}
-
-function databaseUrl(databaseName) {
-  const url = new URL(process.env.DATABASE_ADMIN_URL || "postgres://127.0.0.1:5432/postgres");
-  url.pathname = `/${databaseName}`;
-  return url.toString();
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 test("expired pending-approval payment is auto-cancelled with exactly one chained audit event", async (t) => {
   const stack = await startStack();
@@ -75,13 +43,11 @@ test("expired pending-approval payment is auto-cancelled with exactly one chaine
   // operations.audit_events (worker polls every 500ms, relay delivers every 500ms).
   // Scoped by reference: the seeded stale payments are also expired at worker startup, so
   // other 'Payment expired' rows exist in the same tenant — each payment still gets exactly one.
-  const deadline = Date.now() + 15000;
   let status = null;
-  let auditRows = [];
-  while (Date.now() < deadline) {
+  const auditRows = await waitFor(async () => {
     const state = await api(stack.baseUrl, "/state");
     status = state.data.payments?.find((p) => p.id === paymentId)?.status;
-    auditRows = await withDb(stack, async (client) => {
+    const rows = await withDb(stack, async (client) => {
       const { rows } = await client.query(
         `SELECT actor, action, object, detail FROM operations.audit_events
          WHERE tenant_id = $1 AND action = 'Payment expired' AND object = $2`,
@@ -89,9 +55,8 @@ test("expired pending-approval payment is auto-cancelled with exactly one chaine
       );
       return rows;
     });
-    if (status === "Cancelled" && auditRows.length >= 1) break;
-    await sleep(200);
-  }
+    return status === "Cancelled" && rows.length >= 1 ? rows : null;
+  }, { timeoutMs: 15000, intervalMs: 200, label: `payment ${paymentId} to expire and be audited` });
 
   assert.equal(status, "Cancelled", "expired payment must be auto-cancelled");
 

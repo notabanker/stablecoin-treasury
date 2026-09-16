@@ -1,60 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { startStack } from "../helpers/stack.mjs";
-
-const DEFAULT_TENANT_ID = "00000000-0000-0000-0000-000000000001";
-
-async function api(baseUrl, path, opts = {}) {
-  const res = await fetch(`${baseUrl}/api${path}`, {
-    method: opts.method || "GET",
-    headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
-    body: opts.body,
-    redirect: "manual"
-  });
-  const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
-  const setCookie = res.headers.getSetCookie?.() || [];
-  return { status: res.status, data, setCookie };
-}
-
-async function fetchRaw(baseUrl, path, opts = {}) {
-  const res = await fetch(`${baseUrl}${path}`, {
-    method: opts.method || "GET",
-    headers: { ...(opts.headers || {}) },
-    body: opts.body,
-    redirect: "manual"
-  });
-  const text = await res.text();
-  let data;
-  try { data = JSON.parse(text); } catch { data = text; }
-  const setCookie = res.headers.getSetCookie?.() || [];
-  return { status: res.status, data, setCookie };
-}
-
-function extractCookie(cookies, name) {
-  for (const c of cookies) {
-    if (c.startsWith(`${name}=`)) return c.split(";")[0].split("=").slice(1).join("=");
-  }
-  return null;
-}
+import { DEFAULT_TENANT_ID, api, extractCookie, login } from "../helpers/api.mjs";
+import { withDb } from "../helpers/db.mjs";
+import { startStackFor } from "../helpers/stack.mjs";
 
 // V6 Epic 1.5 — Four-eyes adversarial tests
 
 test("two distinct approvers transition payment to Approved", async (t) => {
-  const prevAuth = process.env.AUTH_REQUIRED;
-  process.env.AUTH_REQUIRED = "true";
-  const stack = await startStack();
-  t.after(async () => {
-    if (prevAuth === undefined) delete process.env.AUTH_REQUIRED;
-    else process.env.AUTH_REQUIRED = prevAuth;
-    await stack.stop();
-  });
+  const stack = await startStackFor(t, { authRequired: true });
 
   // Login as marta (admin with approval permissions)
-  const login1 = await api(stack.baseUrl, "/login", {
-    method: "POST",
-    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123", client: "api" })
-  });
+  const login1 = await login(stack.baseUrl, "marta@vega-industries.com");
   assert.equal(login1.status, 200);
   const martaSession = extractCookie(login1.setCookie, "session");
   const martaCsrf = extractCookie(login1.setCookie, "csrf");
@@ -65,10 +21,7 @@ test("two distinct approvers transition payment to Approved", async (t) => {
   });
 
   // Login as approver
-  const login2 = await api(stack.baseUrl, "/login", {
-    method: "POST",
-    body: JSON.stringify({ email: "approver@vega-industries.com", password: "demo123", client: "api" })
-  });
+  const login2 = await login(stack.baseUrl, "approver@vega-industries.com");
   assert.equal(login2.status, 200);
   const approverSession = extractCookie(login2.setCookie, "session");
   const approverCsrf = extractCookie(login2.setCookie, "csrf");
@@ -99,18 +52,16 @@ test("two distinct approvers transition payment to Approved", async (t) => {
   assert.equal(approve1.data.payment.approvals, 1);
 
   // Insert the second distinct approval via DB (marta is creator and can't approve)
-  const pg = await import("pg");
-  const client = new pg.Client({ connectionString: stack._env.DATABASE_URL });
-  await client.connect();
-  await client.query(
-    "INSERT INTO payment.payment_approvals (tenant_id, payment_id, approver_id, approver_display) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
-    [DEFAULT_TENANT_ID || "00000000-0000-0000-0000-000000000001", paymentId, "system:third-approver", "System (third approver)"]
-  );
-  await client.query(
-    "UPDATE payment.payments SET approvals = (SELECT COUNT(DISTINCT approver_id) FROM payment.payment_approvals WHERE payment_id = $1), status = CASE WHEN (SELECT COUNT(DISTINCT approver_id) FROM payment.payment_approvals WHERE payment_id = $1) >= required_approvals THEN 'Approved' ELSE status END WHERE id = $1",
-    [paymentId]
-  );
-  await client.end();
+  await withDb(stack, async (client) => {
+    await client.query(
+      "INSERT INTO payment.payment_approvals (tenant_id, payment_id, approver_id, approver_display) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+      [DEFAULT_TENANT_ID, paymentId, "system:third-approver", "System (third approver)"]
+    );
+    await client.query(
+      "UPDATE payment.payments SET approvals = (SELECT COUNT(DISTINCT approver_id) FROM payment.payment_approvals WHERE payment_id = $1), status = CASE WHEN (SELECT COUNT(DISTINCT approver_id) FROM payment.payment_approvals WHERE payment_id = $1) >= required_approvals THEN 'Approved' ELSE status END WHERE id = $1",
+      [paymentId]
+    );
+  });
 
   // Verify the payment now has 2 distinct approval rows
   const approvalList = await api(stack.baseUrl, `/payments/${paymentId}/approvals`, {
@@ -122,22 +73,12 @@ test("two distinct approvers transition payment to Approved", async (t) => {
 });
 
 test("creator self-approval above threshold returns 403", async (t) => {
-  const prevAuth = process.env.AUTH_REQUIRED;
-  process.env.AUTH_REQUIRED = "true";
-  const stack = await startStack();
-  t.after(async () => {
-    if (prevAuth === undefined) delete process.env.AUTH_REQUIRED;
-    else process.env.AUTH_REQUIRED = prevAuth;
-    await stack.stop();
-  });
+  const stack = await startStackFor(t, { authRequired: true });
 
-  const login = await api(stack.baseUrl, "/login", {
-    method: "POST",
-    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123", client: "api" })
-  });
-  assert.equal(login.status, 200);
-  const session = extractCookie(login.setCookie, "session");
-  const csrf = extractCookie(login.setCookie, "csrf");
+  const loginRes = await login(stack.baseUrl, "marta@vega-industries.com");
+  assert.equal(loginRes.status, 200);
+  const session = extractCookie(loginRes.setCookie, "session");
+  const csrf = extractCookie(loginRes.setCookie, "csrf");
   const headers = { Cookie: `session=${session}; csrf=${csrf}`, "X-Csrf-Token": csrf };
 
   // Create payment that needs ≥1 approval (above threshold)
@@ -159,8 +100,7 @@ test("creator self-approval above threshold returns 403", async (t) => {
 });
 
 test("forged X-Acting-User is rejected with 401 when internal auth is required", async (t) => {
-  const stack = await startStack({ extraEnv: { INTERNAL_AUTH_REQUIRED: "true" } });
-  t.after(() => stack.stop());
+  const stack = await startStackFor(t, { extraEnv: { INTERNAL_AUTH_REQUIRED: "true" } });
 
   // Try to call payment-service directly with a forged acting-user header
   const paymentPort = stack.ports.payment;
@@ -169,7 +109,7 @@ test("forged X-Acting-User is rejected with 401 when internal auth is required",
     headers: {
       "Content-Type": "application/json",
       "X-Acting-User": JSON.stringify({ id: "attacker", display: "Hacker" }),
-      "X-Tenant-Id": "00000000-0000-0000-0000-000000000001"
+      "X-Tenant-Id": DEFAULT_TENANT_ID
     },
     body: JSON.stringify({ amount: 1, counterpartyId: "cp-nordic", sourceWalletId: "wal-de-eur", type: "Supplier" })
   });
@@ -177,30 +117,17 @@ test("forged X-Acting-User is rejected with 401 when internal auth is required",
 });
 
 test("N-1 distinct approvers leaves payment in PendingApproval", async (t) => {
-  const prevAuth = process.env.AUTH_REQUIRED;
-  process.env.AUTH_REQUIRED = "true";
-  const stack = await startStack();
-  t.after(async () => {
-    if (prevAuth === undefined) delete process.env.AUTH_REQUIRED;
-    else process.env.AUTH_REQUIRED = prevAuth;
-    await stack.stop();
-  });
+  const stack = await startStackFor(t, { authRequired: true });
 
   // Login as approver (not creator) to approve a payment created by another user
-  const login = await api(stack.baseUrl, "/login", {
-    method: "POST",
-    body: JSON.stringify({ email: "approver@vega-industries.com", password: "demo123", client: "api" })
-  });
-  assert.equal(login.status, 200);
-  const approverSession = extractCookie(login.setCookie, "session");
-  const approverCsrf = extractCookie(login.setCookie, "csrf");
+  const approverLogin = await login(stack.baseUrl, "approver@vega-industries.com");
+  assert.equal(approverLogin.status, 200);
+  const approverSession = extractCookie(approverLogin.setCookie, "session");
+  const approverCsrf = extractCookie(approverLogin.setCookie, "csrf");
   const approverHeaders = { Cookie: `session=${approverSession}; csrf=${approverCsrf}`, "X-Csrf-Token": approverCsrf };
 
   // Login as marta to create the payment
-  const martaLogin = await api(stack.baseUrl, "/login", {
-    method: "POST",
-    body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123", client: "api" })
-  });
+  const martaLogin = await login(stack.baseUrl, "marta@vega-industries.com");
   assert.equal(martaLogin.status, 200);
   const martaSession = extractCookie(martaLogin.setCookie, "session");
   const martaCsrf = extractCookie(martaLogin.setCookie, "csrf");

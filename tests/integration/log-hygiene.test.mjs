@@ -1,42 +1,7 @@
 import { strict as assert } from "node:assert";
 import { describe, test } from "node:test";
+import { api, collectChildLogs, extractCookie, login, waitForPaymentStatus } from "../helpers/api.mjs";
 import { startStack } from "../helpers/stack.mjs";
-
-// API helpers mirror the pattern in auth-rbac.test.mjs
-async function api(baseUrl, path, opts = {}) {
-  const res = await fetch(`${baseUrl}/api${path}`, {
-    method: opts.method || "GET",
-    headers: { "Content-Type": "application/json", ...opts.headers },
-    body: opts.body,
-    redirect: "manual"
-  });
-  const text = await res.text();
-  let data;
-  try { data = JSON.parse(text); } catch { data = text; }
-  const setCookie = [];
-  const cookies = res.headers.getSetCookie?.() || [];
-  return { status: res.status, data, setCookie: cookies };
-}
-
-function extractCookie(cookies, name) {
-  for (const c of cookies) {
-    if (c.startsWith(`${name}=`)) return c.split(";")[0].split("=").slice(1).join("=");
-  }
-  return null;
-}
-
-function collectAllLogs(stack) {
-  const all = [];
-  for (const child of stack._children || []) {
-    for (const line of child.logs || []) {
-      all.push(line);
-    }
-  }
-  return all.join("\n");
-}
-
-// The INTERNAL_SERVICE_TOKEN is set by the stack from process.env — capture it.
-const INTERNAL_TOKEN = process.env.INTERNAL_SERVICE_TOKEN || "dev-internal-token";
 
 describe("log hygiene", () => {
   test("full payment lifecycle never writes credentials into service logs", async (t) => {
@@ -53,10 +18,7 @@ describe("log hygiene", () => {
     t.after(async () => await stack.stop());
 
     // 1. Login
-    const loginRes = await api(stack.baseUrl, "/login", {
-      method: "POST",
-      body: JSON.stringify({ email: "marta@vega-industries.com", password: "demo123", client: "api" })
-    });
+    const loginRes = await login(stack.baseUrl, "marta@vega-industries.com");
     assert.equal(loginRes.status, 200);
     const sessionCookie = extractCookie(loginRes.setCookie, "session");
     const csrfToken = extractCookie(loginRes.setCookie, "csrf");
@@ -94,17 +56,13 @@ describe("log hygiene", () => {
     assert.equal(executeRes.status, 200);
 
     // 4. Wait for settlement (saga may take a moment)
-    let settled = false;
-    for (let i = 0; i < 30; i++) {
-      const stateRes = await api(stack.baseUrl, "/state", {
-        headers: { Cookie: `session=${sessionCookie}` }
-      });
-      if (stateRes.status === 200) {
-        const payment = (stateRes.data?.payments || []).find((p) => p.id === paymentId);
-        if (payment?.status === "Settled") { settled = true; break; }
-      }
-      await new Promise((r) => setTimeout(r, 500));
-    }
+    const settled = await waitForPaymentStatus(
+      stack.baseUrl,
+      paymentId,
+      "Settled",
+      { Cookie: `session=${sessionCookie}` },
+      15000
+    );
     assert.ok(settled, "payment should settle within 15 seconds");
 
     // 5. Send a webhook (triggers signing path)
@@ -125,7 +83,7 @@ describe("log hygiene", () => {
     });
 
     // Now collect all logs and verify no credentials leaked
-    const allLogs = collectAllLogs(stack);
+    const allLogs = collectChildLogs(stack);
 
     // Each credential that must NEVER appear in logs
     const forbidden = [

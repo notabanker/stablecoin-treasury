@@ -1,24 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { sleep, waitFor } from "../helpers/api.mjs";
+import { withDb } from "../helpers/db.mjs";
 import { startStack } from "../helpers/stack.mjs";
 
 const DEFAULT_TENANT_ID = "00000000-0000-0000-0000-000000000001";
-
-// Short-lived connection per call, not one held open across the polling window: a long-lived
-// probe connection races with the disposable stack's teardown (pg_terminate_backend on stop)
-// and, worse, with nothing else touching this DB, can itself intermittently receive a server-side
-// termination while idle between polls. Mirrors the fix already applied to the tenant-2 reset
-// test in auth-rbac.test.mjs (0.1.2 session).
-async function withDb(connectionString, fn) {
-  const pg = await import("pg");
-  const client = new pg.Client({ connectionString });
-  await client.connect();
-  try {
-    return await fn(client);
-  } finally {
-    await client.end();
-  }
-}
 
 async function insertOutboxEvent(connectionString, { tenantId = DEFAULT_TENANT_ID, eventType, payload }) {
   return withDb(connectionString, async (client) => {
@@ -30,17 +16,6 @@ async function insertOutboxEvent(connectionString, { tenantId = DEFAULT_TENANT_I
     );
     return rows[0].id;
   });
-}
-
-async function waitFor(fn, { timeoutMs = 20000, intervalMs = 300 } = {}) {
-  const deadline = Date.now() + timeoutMs;
-  let last;
-  while (Date.now() < deadline) {
-    last = await fn();
-    if (last) return last;
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-  throw new Error(`waitFor timed out after ${timeoutMs}ms`);
 }
 
 // V8 Task 0.2.5 (audit finding H3): before this fix, recordDeliveryAttempt was a no-op and
@@ -77,7 +52,7 @@ test("outbox delivery survives a poisoned batch: dead-lettering frees the queue 
       [poisonIds]
     );
     return rows.every((row) => row.dead_lettered_at) ? rows : null;
-  }));
+  }), { timeoutMs: 20000, intervalMs: 300, label: "poison events to dead-letter" });
   for (const row of poisonRows) {
     assert.equal(row.attempts, 1, "poison event must dead-letter after RELAY_MAX_RETRIES=1 attempt, not retry forever");
     assert.ok(row.last_error, "dead-lettered event must record last_error for the ops runbook");
@@ -92,11 +67,11 @@ test("outbox delivery survives a poisoned batch: dead-lettering frees the queue 
       [goodIds]
     );
     return rows.every((row) => row.published_at) ? rows : null;
-  }));
+  }), { timeoutMs: 20000, intervalMs: 300, label: "good events to be delivered" });
   assert.equal(goodRows.length, 3);
 
   // Dead-lettered events must not be retried again once excluded from the poll set.
-  await new Promise((resolve) => setTimeout(resolve, 1500));
+  await sleep(1500);
   await withDb(db, async (client) => {
     const { rows: recheck } = await client.query(
       "SELECT attempts FROM platform.outbox_events WHERE id = ANY($1)",
@@ -135,7 +110,7 @@ test("a failing event that has not yet exhausted retries schedules backoff inste
       [poisonId]
     );
     return rows[0]?.attempts >= 1 ? rows[0] : null;
-  }));
+  }), { timeoutMs: 20000, intervalMs: 300, label: "poison event's first delivery attempt" });
 
   assert.equal(afterFirstAttempt.attempts, 1);
   assert.equal(afterFirstAttempt.dead_lettered_at, null, "must not dead-letter before RELAY_MAX_RETRIES");

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createId, estimateFee, nextPaymentReference, roundMoney } from "../../packages/shared/data.mjs";
+import { createId, estimateFee } from "../../packages/shared/data.mjs";
+import { roundMoney } from "../../packages/shared/money.mjs";
 
 test("roundMoney rounds to 2 decimal places", () => {
   assert.equal(roundMoney(1.006), 1.01);
@@ -15,15 +16,6 @@ test("estimateFee is positive and asset-dependent", () => {
   assert.ok(eurFee > 0);
   assert.ok(usdFee > 0);
   assert.notEqual(eurFee, usdFee);
-});
-
-test("nextPaymentReference increments from the highest existing reference", () => {
-  const payments = [{ reference: "PMT-1001" }, { reference: "PMT-1050" }, { reference: "PMT-1002" }];
-  assert.equal(nextPaymentReference(payments), "PMT-1051");
-});
-
-test("nextPaymentReference defaults sanely on empty input", () => {
-  assert.equal(nextPaymentReference([]), "PMT-1001");
 });
 
 test("createId produces unique, prefixed, UUID-backed ids", () => {

@@ -1,22 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { DEFAULT_TENANT_ID, api, waitFor } from "../helpers/api.mjs";
 import { startStack } from "../helpers/stack.mjs";
 
-const TENANT_1 = "00000000-0000-0000-0000-000000000001";
-
-async function api(baseUrl, path, options = {}) {
-  const response = await fetch(`${baseUrl}/api${path}`, {
-    ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) }
-  });
-  const text = await response.text();
-  return { status: response.status, data: text ? JSON.parse(text) : null };
-}
-
+// Statement-specific service-port helper: statements are ingested directly against the
+// reconciliation service, not through the gateway.
 function reconApi(stack, path, options = {}) {
   return fetch(`http://127.0.0.1:${stack.ports.reconciliation}${path}`, {
     ...options,
-    headers: { "Content-Type": "application/json", "X-Tenant-Id": TENANT_1, ...(options.headers || {}) }
+    headers: { "Content-Type": "application/json", "X-Tenant-Id": DEFAULT_TENANT_ID, ...(options.headers || {}) }
   });
 }
 
@@ -30,31 +22,27 @@ async function settlePayment(stack, idempotencyKey, amount = 5000) {
   await api(stack.baseUrl, `/payments/${paymentId}/approve`, { method: "POST" });
   await api(stack.baseUrl, `/payments/${paymentId}/execute`, { method: "POST" });
 
-  const deadline = Date.now() + 15000;
-  while (Date.now() < deadline) {
+  return waitFor(async () => {
     const state = await api(stack.baseUrl, "/state");
     const payment = state.data.payments?.find((p) => p.id === paymentId);
     if (payment?.status === "Settled") return payment;
     if (payment?.status === "Failed" || payment?.status === "Blocked") {
       throw new Error(`Payment ${paymentId} ended ${payment.status}`);
     }
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
-  throw new Error(`Payment ${paymentId} did not settle`);
+    return null;
+  }, { timeoutMs: 15000, label: `payment ${paymentId} to settle` });
 }
 
 async function waitForMatch(stack, statementId, timeoutMs = 15000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  return waitFor(async () => {
     const res = await reconApi(stack, "/statements");
     const statements = await res.json();
     const statement = statements.find((s) => s.id === statementId);
     if (statement && statement.lineCount > 0 && statement.matchedCount + statement.exceptionCount === statement.lineCount) {
       return statement;
     }
-    await new Promise((resolve) => setTimeout(resolve, 300));
-  }
-  throw new Error(`Statement ${statementId} was not fully matched in time`);
+    return null;
+  }, { timeoutMs, intervalMs: 300, label: `statement ${statementId} to be fully matched` });
 }
 
 test("statement ingestion matches exact refs and opens categorized exceptions", async (t) => {
@@ -148,15 +136,12 @@ test("SIMULATED_STATEMENT_EMIT drives the full settle -> ingest -> match path", 
 
   const payment = await settlePayment(stack, "stmt-emit-1", 6000);
 
-  const deadline = Date.now() + 15000;
-  let statement = null;
-  while (Date.now() < deadline) {
+  const statement = await waitFor(async () => {
     const res = await reconApi(stack, "/statements");
     const statements = await res.json();
-    statement = statements.find((s) => s.externalId === `sim-stmt-${payment.providerRef}`);
-    if (statement && statement.matchedCount === 1) break;
-    await new Promise((resolve) => setTimeout(resolve, 300));
-  }
+    const found = statements.find((s) => s.externalId === `sim-stmt-${payment.providerRef}`);
+    return found && found.matchedCount === 1 ? found : null;
+  }, { timeoutMs: 15000, intervalMs: 300, label: "simulated statement to be emitted and matched" });
   assert.ok(statement, "settlement must auto-emit a simulated provider statement");
   assert.equal(statement.matchedCount, 1, "the emitted line must match its own payment exactly");
   assert.equal(statement.exceptionCount, 0);

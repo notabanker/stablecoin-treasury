@@ -1,17 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import pg from "pg";
+import { DEFAULT_TENANT_ID, api, waitFor } from "../helpers/api.mjs";
+import { withDb } from "../helpers/db.mjs";
 import { startStack } from "../helpers/stack.mjs";
-import { DEFAULT_TENANT_ID } from "../../packages/shared/tenant.mjs";
 
-async function api(baseUrl, path, options = {}) {
-  const response = await fetch(`${baseUrl}/api${path}`, {
-    ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) }
-  });
-  const text = await response.text();
-  const data = text ? JSON.parse(text) : null;
-  return { status: response.status, data };
+async function waitForSettlement(baseUrl, paymentId, timeoutMs = 10000) {
+  return waitFor(async () => {
+    const state = await api(baseUrl, "/state");
+    const payment = state.data.payments?.find((p) => p.id === paymentId);
+    return payment && ["Settled", "Failed", "Blocked"].includes(payment.status) ? state : null;
+  }, { timeoutMs, label: `payment ${paymentId} to settle` });
 }
 
 test("saga records execution attempts for every step", async (t) => {
@@ -255,23 +253,6 @@ test("execute on already-settled payment returns without re-enqueueing", async (
   assert.equal(retry.data.message, "Already settled");
 });
 
-async function waitForSettlement(baseUrl, paymentId, timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const state = await api(baseUrl, "/state");
-    const payment = state.data.payments?.find((p) => p.id === paymentId);
-    if (payment && (payment.status === "Settled" || payment.status === "Failed" || payment.status === "Blocked")) {
-      return state;
-    }
-    await sleep(200);
-  }
-  throw new Error(`Payment ${paymentId} did not settle within ${timeoutMs}ms`);
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function servicePost(baseUrl, path, eventId, body) {
   const response = await fetch(`${baseUrl}${path}`, {
     method: "POST",
@@ -284,20 +265,4 @@ async function servicePost(baseUrl, path, eventId, body) {
   });
   const text = await response.text();
   return { status: response.status, data: text ? JSON.parse(text) : null };
-}
-
-async function withDb(stack, fn) {
-  const client = new pg.Client({ connectionString: databaseUrl(stack.databaseName) });
-  await client.connect();
-  try {
-    return await fn(client);
-  } finally {
-    await client.end();
-  }
-}
-
-function databaseUrl(databaseName) {
-  const url = new URL(process.env.DATABASE_ADMIN_URL || "postgres://127.0.0.1:5432/postgres");
-  url.pathname = `/${databaseName}`;
-  return url.toString();
 }

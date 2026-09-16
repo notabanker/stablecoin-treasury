@@ -1,46 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { api, login, waitFor } from "../helpers/api.mjs";
+import { withDb } from "../helpers/db.mjs";
 import { startStack } from "../helpers/stack.mjs";
 
 const TENANT_1 = "00000000-0000-0000-0000-000000000001";
-
-async function api(baseUrl, path, options = {}) {
-  const response = await fetch(`${baseUrl}/api${path}`, {
-    ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) }
-  });
-  const text = await response.text();
-  const data = text ? JSON.parse(text) : null;
-  return { status: response.status, data };
-}
-
-async function login(baseUrl, email) {
-  return api(baseUrl, "/login", { method: "POST", body: JSON.stringify({ email, password: "demo123", client: "api" }) });
-}
-
-// Short-lived connection per call -- see the outbox-dlq.test.mjs / auth-rbac.test.mjs lesson
-// (57P01 "terminating connection due to administrator command" from a long-lived probe).
-async function withDb(connectionString, fn) {
-  const pg = await import("pg");
-  const client = new pg.Client({ connectionString });
-  await client.connect();
-  try {
-    return await fn(client);
-  } finally {
-    await client.end();
-  }
-}
-
-async function waitFor(fn, { timeoutMs = 15000, intervalMs = 300 } = {}) {
-  const deadline = Date.now() + timeoutMs;
-  let last;
-  while (Date.now() < deadline) {
-    last = await fn();
-    if (last) return last;
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-  throw new Error(`waitFor timed out after ${timeoutMs}ms`);
-}
 
 // V8 Task 0.3.6 (Gate G1, Finding 1 -- CRITICAL): before this fix, a crash (or an ambiguous
 // throw -- network timeout, process death) between the provider accepting a transfer and this
@@ -85,14 +49,14 @@ test("provider crash-then-retry reuses the same idempotency key instead of dupli
       [TENANT_1, paymentId]
     );
     return rows[0]?.status === "failed" ? rows[0] : null;
-  }));
+  }), { timeoutMs: 15000, intervalMs: 300, label: "first provider submission to fail" });
   assert.equal(afterFirstAttempt.provider_ref, null, "the failed first attempt must not persist a provider_ref");
   assert.ok(afterFirstAttempt.last_error, "the failed attempt must record last_error");
 
   const failedState = await waitFor(() => withDb(db, async (client) => {
     const { rows } = await client.query("SELECT status, provider_ref FROM payment.payments WHERE id = $1", [paymentId]);
     return rows[0]?.status === "Failed" ? rows[0] : null;
-  }));
+  }), { timeoutMs: 15000, intervalMs: 300, label: "payment to be marked Failed" });
   assert.ok(!failedState.provider_ref, "payment.payments must not have a provider_ref from the crashed attempt");
 
   // Retry via the existing repair path (Failed -> Executing -> saga re-runs). The saga re-enters
@@ -105,7 +69,7 @@ test("provider crash-then-retry reuses the same idempotency key instead of dupli
   const settled = await waitFor(() => withDb(db, async (client) => {
     const { rows } = await client.query("SELECT status, provider_ref FROM payment.payments WHERE id = $1", [paymentId]);
     return rows[0]?.status === "Settled" ? rows[0] : null;
-  }));
+  }), { timeoutMs: 15000, intervalMs: 300, label: "payment to settle after repair retry" });
 
   // Deterministic proof of reuse: the crash adapter derives providerRef purely from the
   // idempotency key (CRASH-<key>). This value only matches if the retry used the exact same
@@ -162,7 +126,7 @@ test("a debit failure after the provider already accepted the transfer leaves th
     const result = await api(stack.baseUrl, `/payments/${paymentId}/attempts`, { headers: adminHeaders });
     const debitError = result.data?.attempts?.find((a) => a.step === "ledger_debit" && a.outcome === "error");
     return debitError || null;
-  });
+  }, { timeoutMs: 15000, intervalMs: 300, label: "ledger_debit failure attempt" });
   assert.match(attempts.error, /wallet_inactive|not active|Suspended/i);
 
   const payment = await withDb(db, async (client) => {
