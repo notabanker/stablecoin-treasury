@@ -41,6 +41,5 @@ A pilot partner explicitly requires SSO, OR the platform reaches general availab
 
 ## References
 
-- `docs/V6_PLAN.md` Epic 4, Task 4.3
-- `docs/V6_TASK_LIST.md` Task 4.3
-- `docs/PRODUCTION_MVP_BACKLOG.md` M4 backlog items
+- `docs/HISTORY.md` — V6 program record (Task 4.3)
+- `TECHNICAL_TASKS.md` — open OIDC/SSO item and Phase 1 product work

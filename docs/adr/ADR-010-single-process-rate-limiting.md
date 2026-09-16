@@ -74,7 +74,6 @@ tests against a multi-instance deployment become the new verification burden.
 
 - `packages/shared/http.mjs` lines 14–50: `rateBuckets` Map and `checkRateLimit` implementation
 - `packages/shared/auth.mjs` line 18: `loginFailures` Map
-- `docs/ENVIRONMENT.md` § Client IP and Rate Limiting
-- `docs/PRODUCTION_READINESS.md` § Verified Gaps (G5)
-- `docs/V6_PLAN.md` Epic 0, Task 0.3
-- `docs/PRODUCTION_MVP_BACKLOG.md` ADR-001 (dependency policy)
+- `docs/ENVIRONMENT.md` § Rate Limiting And Proxies
+- `docs/PRODUCTION_READINESS.md` § Remaining Application Gaps
+- `docs/HISTORY.md` — V6 program record (Task 0.3)

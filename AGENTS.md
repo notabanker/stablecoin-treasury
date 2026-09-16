@@ -1,55 +1,47 @@
 # AGENTS.md
 
-Project-specific instructions for coding agents working on the corporate stablecoin treasury platform.
+Project instructions for coding agents working on the corporate stablecoin treasury platform.
 
 ## Start Here
 
-Before coding, read these files in this order:
+Read in order before changing anything:
 
-1. `PROJECT_STATE.md`
-2. `docs/AGENT_LOOP.md`
-3. `README.md`
-4. `TECHNICAL_TASKS.md` or the relevant `docs/*.md` task file for the current work
-
-Treat `PROJECT_STATE.md` as the current source of truth for the active task, open questions, acceptance criteria, and last known test results.
+1. [PROJECT_STATE.md](PROJECT_STATE.md) — current state of truth: status, gaps, next work.
+2. `AGENTS.md` (this file) — workflow, gates, coding rules.
+3. [TECHNICAL_TASKS.md](TECHNICAL_TASKS.md) — the live backlog.
+4. The code you will touch — code wins over docs.
 
 ## Project Context
 
-This is a development-stage corporate stablecoin treasury platform for EU corporate treasury workflows. It covers wallet balances, policy-governed payments, four-eyes approvals, reconciliation, accounting journals, operations, auditability, and production-hardening checks.
-
-This is not production money-movement infrastructure yet. Do not claim production readiness unless the project's own readiness docs, tests, and Flo's approval support that claim.
+Development-stage MiCA-oriented treasury platform: wallet balances, policy-governed payments,
+four-eyes approvals, double-entry ledger, reconciliation, accounting journals, operations,
+and tamper-evident audit. Not production money-movement infrastructure — do not claim
+production readiness, live settlement, or licensing the project does not have.
 
 ## Development Loop
 
-For every task:
-
-1. Restate the active task and acceptance criteria.
+1. Restate the task and acceptance criteria.
 2. Inspect the relevant files before editing.
-3. Make a small implementation plan.
-4. Implement one focused subtask.
-5. Run the narrowest useful verification command.
-6. Use failures, logs, and test output as feedback.
-7. Repair only what the feedback proves is broken.
-8. Repeat up to 3 repair attempts.
-9. Update `PROJECT_STATE.md` with changes, tests, and next step.
-10. Stop when acceptance criteria pass or human judgment is needed.
+3. Write or extend a failing regression/adversarial test when behavior changes.
+4. Make the smallest safe fix, matching existing patterns.
+5. Run the narrowest useful check, then widen to the full loop.
+6. Repair only what the feedback proves is broken; max 3 attempts, then stop and report.
+7. Update `PROJECT_STATE.md` (status, evidence, next step) before finishing.
 
 ## Verification Commands
 
-Use the smallest relevant check first:
+Smallest first:
 
-- Syntax/config/migration checks: `npm run check`
-- Unit tests: `npm run test`
-- Integration tests: `npm run test:integration`
-- Concurrency tests: `npm run test:concurrency`
-- Full automated suite: `npm run test:all`
-- Smoke test against a live local stack: `npm run smoke`
-- Local stack: `npm run dev`
-- Database setup: `npm run db:setup`
+- `npm run check` — syntax, migration lint, prod-config gate
+- `npm run test` — unit; `npm run test:integration`; `npm run test:concurrency`
+- `npm run test:all` — required before declaring any task done
+- `npm run invariants` — DB invariants, all zero (see `docs/RUNBOOKS.md`)
+- `npm run smoke` — happy path + failure paths against a live local stack
+- `npm run db:setup`, `npm run migrate`, `npm run dev`
 
 ## Human Approval Required Before
 
-Stop and ask Flo before making changes that affect:
+Stop and ask Flo before changes affecting:
 
 - Accounting rules or journal semantics
 - Policy/compliance behavior
@@ -63,10 +55,16 @@ Stop and ask Flo before making changes that affect:
 
 ## Coding Rules
 
-- Prefer small, reviewable changes.
-- Preserve existing architecture and service boundaries.
-- Do not invent regulated-finance behavior without explicit approval.
-- Do not loosen controls to make tests pass.
-- Add or update regression tests for security, accounting, payment, reconciliation, and tenant-isolation behavior.
-- Keep documentation aligned with actual code behavior.
+- Prefer small, reviewable changes; preserve service boundaries.
+- Do not loosen controls to make tests pass; never hide uncertainty.
+- Never commit secrets; never log credentials, tokens, or connection strings.
+- Add or update regression tests for security, accounting, payment, reconciliation, and
+  tenant-isolation behavior.
+- Money paths use `packages/shared/money.mjs`; no bare `Number()` on amount/fee/balance.
+- Keep docs claiming exactly what the tests prove.
 
+## Stop Conditions
+
+Stop and report when: acceptance criteria are unclear; a fix requires changing gated
+semantics; the same failure survives 3 repair attempts; you find conflicting docs; the work
+would become a broad refactor.

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.0 (2026-09-16)
+
+### Changed
+- Shared runtime extraction: `packages/shared/service.mjs` (`createDomainService`) and
+  `worker.mjs` now own service/worker boilerplate; domain services and workers reduced to
+  configuration plus routes/handlers
+- God files split: `payment-service` → payments/idempotency/approvals, `accounting-service`
+  → journals, `reconciliation-service` → store/statements, `job-worker` →
+  queue/scheduler/active-tenants/handlers, gateway web code split into `apps/web/js/*`
+- Shared modules consolidated: `payment.mjs`, `policy-math.mjs`, `rows.mjs`, `metrics.mjs`,
+  `log.mjs`; demo fixtures moved to `packages/shared/seed-data.json`
+- Tests consolidated: `auth-rbac` split into `auth` + `rbac`; shared
+  `tests/helpers/{api,db}.mjs` helpers
+- Docs consolidated from ~13,800 lines to a small accuracy-first set; stale phase/audit
+  artifacts removed with outcomes recorded in `docs/HISTORY.md`
+
+### Removed
+- Dead `packages/shared/provider-adapter.mjs` (the real seam is `adapters/custody.mjs`)
+
 ## 0.2.0 (2026-07-15)
 
 ### Added

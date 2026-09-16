@@ -1,73 +1,52 @@
 # Credential Rotation
 
-This document describes how credentials are managed across the platform and the rotation procedure for each type.
+## Inventory
 
-## Credential Inventory
-
-| Credential | Location | Rotation Frequency | Rotation Method |
+| Credential | Location | Frequency | Method |
 |---|---|---|---|
-| `INTERNAL_SERVICE_TOKEN` | Environment variable | Quarterly | Generate new HMAC-SHA256 token, update in secrets manager + env, rolling restart |
-| `WEBHOOK_SECRET` | Environment variable | Quarterly | Generate new HMAC-SHA256 secret, update provider config, verify webhook delivery |
-| `SESSION_COOKIE_SECURE` | Environment variable | Per-deploy | Set `SESSION_COOKIE_SECURE=true` in production; cookie keys change on deploy |
-| `SERVICE_DB_PASSWORD` | Environment variable / secrets manager | Quarterly | Update Postgres role password, update env, verify connectivity |
-| User passwords | `identity.users.password_hash` | Per-user action | Users reset via CLI / support; hashed with scrypt (see `packages/shared/auth.mjs`) |
-| Session tokens | `identity.sessions.token` | Per-login | Automatically rotated on every login (session fixation prevention) |
-| CSRF tokens | `identity.sessions.csrf_token` | Per-login | Automatically generated and set as HttpOnly cookie on login |
-| TLS certificates | Infra / WAF | Per-certificate | External — see `docs/RUNBOOKS.md` for renewal procedure |
+| `INTERNAL_SERVICE_TOKEN` | env / secrets manager | Quarterly | New random token, update all services, rolling restart |
+| `WEBHOOK_SECRET` | env / per-provider `operations.providers.webhook_secret` | Quarterly | New secret on both sides, verify delivery |
+| `SERVICE_DB_PASSWORD` | env / secrets manager | Quarterly | `ALTER ROLE svc_* WITH PASSWORD ...`, update env, restart |
+| User passwords | `identity.users.password_hash` | Per-user action | Reset by support; scrypt hashes (`packages/shared/auth.mjs`) |
+| Session tokens | `identity.sessions.token` | Per login | Rotated automatically on every login |
+| CSRF tokens | `identity.sessions.csrf_token` | Per login | Generated on login, set as cookie |
+| TLS certificates | Ingress / reverse proxy | Per certificate | External to the app (do not set HSTS in app; ingress does) |
 
-## Rotation Procedure
+## Procedures
 
 ### Internal Service Token
 
-1. Generate a new token:
-   ```bash
-   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-   ```
-2. Update `INTERNAL_SERVICE_TOKEN` in the secrets manager.
-3. Deploy the new token to all services (`api-gateway`, `wallet-service`, `payment-service`, etc.).
-4. Perform a rolling restart to pick up the new value.
-5. Verify: run `npm run test:integration` — the HMAC-signed internal auth tests must pass.
+1. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
+2. Update `INTERNAL_SERVICE_TOKEN` in the secrets manager / environment.
+3. Deploy to every service; rolling restart.
+4. Verify: `npm run test:integration` (internal-auth tests must pass).
 
 ### Webhook Secret
 
-1. Generate a new secret:
-   ```bash
-   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-   ```
-2. Update `WEBHOOK_SECRET` in the environment.
-3. Update the provider dashboard with the new secret.
-4. Verify: run `tests/integration/webhooks.test.mjs` — signature validation must pass.
+1. Generate a new secret (same command as above).
+2. Update `WEBHOOK_SECRET` (and the provider config) plus `operations.providers.webhook_secret`.
+3. Verify: `tests/integration/webhooks.test.mjs`; send a signed test delivery.
+4. Signatures are HMAC-SHA256 over the exact raw body (hex, `x-webhook-signature`).
 
 ### Database Passwords
 
-1. Connect as superuser:
-   ```bash
-   psql "${DATABASE_URL}"
-   ```
-2. Rotate each service role:
-   ```sql
-   ALTER ROLE svc_wallet WITH PASSWORD 'new-password';
-   ALTER ROLE svc_payment WITH PASSWORD 'new-password';
-   -- ... repeat for all service roles
-   ```
+1. Connect as superuser: `psql "${DATABASE_ADMIN_URL}"`.
+2. Rotate each role: `ALTER ROLE svc_wallet WITH PASSWORD 'new-password';` (repeat per role).
 3. Update `SERVICE_DB_PASSWORD` in the secrets manager.
-4. Verify: restart services and confirm `npm run test:integration` passes.
+4. Restart services and verify `npm run test:integration`.
 
 ## Production Gate
 
-The `validateProductionConfig()` function in `packages/shared/config.mjs` enforces that:
-- `INTERNAL_SERVICE_TOKEN` is set and not the development default
-- `SERVICE_DB_PASSWORD` is not the development default (`service-dev-password`)
-- `DATABASE_URL` does not point to localhost
-- `CORS_ORIGIN` is set and not a wildcard
-- `AUTH_REQUIRED=true`, `INTERNAL_AUTH_REQUIRED=true`
-- `NODE_ENV=production`, `SESSION_COOKIE_SECURE=true`
+`validateProductionConfig()` (packages/shared/config.mjs) blocks boot in `PRODUCTION_MODE`
+when: `AUTH_REQUIRED` or `INTERNAL_AUTH_REQUIRED` are not `true`; `INTERNAL_SERVICE_TOKEN`
+or `SERVICE_DB_PASSWORD` are unset/default; `DATABASE_URL` points at localhost/`treasury_dev`;
+`CORS_ORIGIN` is unset or `*`; `NODE_ENV` is not production; and, for the gateway,
+`SESSION_COOKIE_SECURE` is not true or the webhook secrets are defaults.
 
-This gate runs on every service startup and prevents a service from booting with unsafe defaults in production. See `tests/unit/config.test.mjs` for validation test cases.
+## Notes
 
-## Design Decisions
-
-- ADR-008 (pending): secrets manager selection for production credential storage.
-- ADR-010: rate limiters are in-memory per process — credentials are not shared across replicas in the current single-instance pilot.
-- Session fixation prevention: old session tokens are invalidated on every new login.
-- Audit events are emitted for login, logout, and security-sensitive operations, providing an audit trail for credential usage.
+- Secrets never belong in source, committed env files, logs, tests, or docs. Errors are
+  redacted (first/last 4 chars only).
+- ADR-010: rate limiters and login lockout are per-process in-memory — not shared across replicas.
+- Sessions are rotated on login (fixation prevention); failed logins and lockouts are
+  audited under the resolved user's tenant.

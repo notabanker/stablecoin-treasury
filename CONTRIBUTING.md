@@ -1,51 +1,38 @@
 # Contributing
 
-## Getting Started
+## Setup
 
 1. Clone the repository.
-2. Run `npm install`.
-3. Run `npm run db:setup` to create local databases and apply migrations.
-4. Run `npm run test:all` to verify everything passes.
+2. Run `npm install` (Node >= 20; only runtime dependency is `pg`).
+3. Run `npm run db:setup` to create `treasury_dev`/`treasury_test` and apply migrations.
+4. Run `npm run test:all` to verify the baseline is green.
 
 ## Development Loop
 
-1. Restate the active task and acceptance criteria.
-2. Inspect the relevant files before editing.
-3. Make a small implementation plan.
-4. Implement one focused subtask.
-5. Run the narrowest useful verification command.
-6. Use failures, logs, and test output as feedback.
-7. Repair only what the feedback proves is broken.
-8. Repeat up to 3 repair attempts.
-9. Update `PROJECT_STATE.md` with changes, tests, and next step.
+`AGENTS.md` has the full loop and the human-approval gates. In short:
 
-See `AGENTS.md` for the full development loop and coding rules.
+1. Restate the task and acceptance criteria.
+2. Inspect the code before editing; write a failing regression test when behavior changes.
+3. Implement the smallest safe fix.
+4. Run the narrowest useful check, then `npm run test:all`.
+5. Update `PROJECT_STATE.md` with status, evidence, and next step.
 
 ## Code Style
 
-- ESM-only (`"type": "module"`), Node >= 20.
-- No runtime dependencies except `pg`.
-- Use `packages/shared/` for cross-service utilities.
-- Database migrations in `db/migrations/` with sequential numeric prefixes.
-- Test files follow `tests/{unit,integration,concurrency}/*.test.mjs`.
+- ESM-only (`"type": "module"`); no new runtime dependencies without an ADR.
+- Use `packages/shared/` for cross-service utilities; money via `packages/shared/money.mjs`.
+- Migrations in `db/migrations/` with sequential numeric prefixes; never edit applied ones.
+- Tests live in `tests/{unit,integration,concurrency}/*.test.mjs` (`node:test`).
 
 ## Service Boundaries
 
-- Each service owns its Postgres schema and may read other schemas only through the API gateway.
+- Each service owns its Postgres schema and reaches other domains only through HTTP.
 - Service-to-service calls use HMAC-signed internal auth.
-- Tenants are isolated by `tenant_id` on every table, enforced by RLS at the database level.
-
-## Testing
-
-- Unit tests: `npm run test` (pure logic, no DB required).
-- Integration tests: `npm run test:integration` (full stack against ephemeral DBs).
-- Concurrency tests: `npm run test:concurrency` (N-way parallel requests).
-- Smoke tests: `npm run smoke` (against running gateway).
+- Every tenant-scoped table is protected by RLS; tenant context comes from the request.
 
 ## Pull Requests
 
-- Keep changes focused on a single concern.
-- Add or update tests for the changed behavior.
-- Ensure all tests pass: `npm run test:all`.
-- Update `CHANGELOG.md` with notable changes.
-- Tag with the relevant audit finding ID (e.g., `H1`, `M5`) where applicable.
+- One concern per PR; add or update tests for changed behavior.
+- `npm run check` and `npm run test:all` must pass.
+- Update `CHANGELOG.md` for notable changes.
+- Never commit secrets; never weaken controls to make tests pass.

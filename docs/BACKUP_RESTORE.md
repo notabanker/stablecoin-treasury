@@ -1,17 +1,20 @@
 # Backup & Restore
 
-## pg_dump Backup
+## Backup
+
+Custom-format dump (recommended):
 
 ```bash
 pg_dump -U postgres -h 127.0.0.1 -Fc treasury_dev > backup_$(date +%Y%m%d_%H%M%S).dump
 ```
 
-For plain SQL:
+Plain SQL alternative:
+
 ```bash
 pg_dump -U postgres -h 127.0.0.1 treasury_dev > backup.sql
 ```
 
-## pg_restore
+## Restore
 
 ```bash
 psql -U postgres -h 127.0.0.1 -c "CREATE DATABASE treasury_restored"
@@ -20,20 +23,25 @@ pg_restore -U postgres -h 127.0.0.1 -d treasury_restored backup.dump
 psql -U postgres -h 127.0.0.1 treasury_restored < backup.sql
 ```
 
-## Point-in-Time Recovery
+After restoring:
 
-PostgreSQL PITR requires WAL archiving (not configured in this prototype). For production, use cloud-managed PostgreSQL with PITR enabled.
-
-## Migration Order
-
-Migrations run in numeric filename order. After restoring a backup, run:
 ```bash
-npm run migrate
+DATABASE_URL=postgres://127.0.0.1:5432/treasury_restored npm run migrate
+DATABASE_URL=... npm run invariants
+DATABASE_URL=... node scripts/verify-audit-chain.mjs
 ```
-to apply any newer migrations not included in the backup.
 
-## Tenant Isolation
+## Point-In-Time Recovery
 
-Backup includes all tenant data. When restoring to a different environment, ensure tenant isolation by:
-1. Verifying tenant IDs are consistent
-2. Running cross-tenant sanity checks after restore
+PITR requires WAL archiving, which is **not configured** in this local/Compose setup.
+Production requires managed PostgreSQL with PITR enabled, retention policies per data class
+(payments/audit: long; idempotency keys: expiring), and a restore drill.
+
+## Notes
+
+- Migrations are forward-only. Restore the matching backup first, then `npm run migrate`
+  applies any newer migrations not present in the dump.
+- A backup contains all tenants. After restoring into a different environment, verify
+  tenant IDs and run the invariant and cross-tenant checks before serving traffic.
+- The audit chain verifies on restored data because `row_hash`/`prev_hash` are stored rows;
+  a dump that preserves all rows preserves the chain.

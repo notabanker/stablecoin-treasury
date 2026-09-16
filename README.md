@@ -1,81 +1,54 @@
 # Corporate Stablecoin Treasury Platform
 
-[![CI](https://github.com/notabanker/stablecoin-treasury/actions/workflows/ci.yml/badge.svg)](https://github.com/notabanker/stablecoin-treasury/actions/workflows/ci.yml)
+Development-stage, MiCA-oriented corporate stablecoin treasury platform for EU corporate
+treasury workflows: wallet balances, policy-governed payments with four-eyes approvals,
+double-entry ledger and journals, reconciliation, operations, and tamper-evident audit.
 
-Technology-only project folder for a MiCA-aligned corporate stablecoin treasury platform.
-
-## Files
-
-- `apps/web/` - gateway-served treasury operations UI.
-- `services/` - independently runnable microservices.
-- `packages/shared/` - shared HTTP helper, seed data, and service client.
-- `docker-compose.yml` - local container orchestration.
-- `docs/ARCHITECTURE.md` - service map and design notes.
-- `docs/PRODUCTION_READINESS.md` - reliability status and remaining production gaps.
-- `docs/V3_PLAN.md` - V3 secure pilot foundation plan with milestones, tasks, and release gates.
-- `TECHNICAL_TASKS.md` - technology task and subtask backlog for MVP and later phases.
-
-## Product Focus
-
-Build a corporate-grade treasury SaaS platform that lets EU mid-to-large corporates hold, move, convert, reconcile, and report stablecoin balances through regulated partners, with strong controls, auditability, ERP/TMS integration, and policy enforcement.
+**Status: development-stage. Production money movement is NO-GO.** Settlement is simulated
+behind a custody-adapter seam; real rails, secrets management, and production infrastructure
+are not in place. See `docs/PRODUCTION_READINESS.md`.
 
 ## Run
 
-Requires a local Postgres instance (`postgres://127.0.0.1:5432` by default). One-time setup:
+Requires local PostgreSQL and Node >= 20.
 
 ```bash
-npm run db:setup
+npm install
+npm run db:setup   # create treasury_dev/treasury_test and apply migrations
+npm run dev        # start all services (gateway: http://127.0.0.1:8080)
 ```
 
-Then run the microservices stack:
-
-```bash
-npm run dev
-```
-
-Then open:
-
-```text
-http://127.0.0.1:8080
-```
-
-The gateway serves `apps/web` and exposes `/api/state`, `/api/docs`, and command endpoints for payments, policies, reconciliation, operations, and accounting.
-
-## MVP Prototype Includes
-
-- Treasury desk dashboard with wallet balances, issuer exposure, provider health, alerts, and payment queue.
-- Payment creation, approval, cancellation, execution, policy checks, and settlement simulation.
-- Wallet and asset registry with custody-provider coverage.
-- Policy thresholds and asset allowlist controls.
-- Reconciliation exceptions with manual resolution.
-- Journal-entry generation and CSV export.
-- Operations console for provider status and audit events.
+Other commands: `npm run check` · `npm run test` · `npm run test:integration` ·
+`npm run test:concurrency` · `npm run test:all` · `npm run invariants` · `npm run smoke` ·
+`npm run migrate` · `docker compose up --build`.
 
 ## Services
 
-- `api-gateway` on `8080`
-- `wallet-service` on `4101`
-- `policy-service` on `4102`
-- `compliance-service` on `4103`
-- `payment-service` on `4104`
-- `accounting-service` on `4105`
-- `reconciliation-service` on `4106`
-- `operations-service` on `4107`
+| Service | Port | Owns |
+|---|---|---|
+| api-gateway | 8080 | BFF, web UI, auth/RBAC, webhooks |
+| wallet-service | 4101 | entities, assets, wallets, ledger |
+| policy-service | 4102 | approval thresholds, allowlists, evaluation |
+| compliance-service | 4103 | counterparties (simulated screening) |
+| payment-service | 4104 | payment lifecycle, approvals, idempotency |
+| accounting-service | 4105 | journal entries, exports |
+| reconciliation-service | 4106 | matches, exceptions, provider statements |
+| operations-service | 4107 | providers, alerts, audit events |
+| relay-worker | 9101 | outbox event relay |
+| job-worker | 9102 | durable jobs (saga, expiry, watchdog, audit chain) |
 
-## Docker
+## Documentation
 
-```bash
-docker compose up --build
-```
-
-## Reliability
-
-This version includes durable service-local state, idempotent wallet debits, idempotent payment creation, service health checks, request timeouts, structured logs, `/metrics`, graceful shutdown, Docker health checks, and a smoke test.
-
-Run:
-
-```bash
-npm run smoke
-```
-
-See [PRODUCTION_READINESS.md](/Users/notabanker/projects/corporate-stablecoin-treasury-platform/docs/PRODUCTION_READINESS.md) for what is hardened and what still needs to happen before real regulated treasury use.
+- [PROJECT_STATE.md](PROJECT_STATE.md) — current state of truth, gaps, next work.
+- [TECHNICAL_TASKS.md](TECHNICAL_TASKS.md) — live backlog.
+- [AGENTS.md](AGENTS.md) — workflow and approval gates for coding agents; [CONTRIBUTING.md](CONTRIBUTING.md) for humans.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — service map, request flows, shared module map.
+- [docs/DATABASE.md](docs/DATABASE.md) — schemas, migration policy, RLS, reset/seed.
+- [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) — environment variables and defaults.
+- [docs/RUNBOOKS.md](docs/RUNBOOKS.md) — operational procedures.
+- [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) — what is hardened, what is missing.
+- [docs/ONBOARDING.md](docs/ONBOARDING.md) — setup and repo tour.
+- [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) — pre-deploy checks.
+- [docs/BACKUP_RESTORE.md](docs/BACKUP_RESTORE.md), [docs/CREDENTIAL_ROTATION.md](docs/CREDENTIAL_ROTATION.md) — operations references.
+- [docs/HISTORY.md](docs/HISTORY.md) — dated record of audits, releases, and refactors.
+- [docs/adr/](docs/adr/) — architecture decision records.
