@@ -41,6 +41,7 @@ Other commands: `npm run check` · `npm run test` · `npm run test:integration` 
 
 - [PROJECT_STATE.md](PROJECT_STATE.md) — current state of truth, gaps, next work.
 - [TECHNICAL_TASKS.md](TECHNICAL_TASKS.md) — live backlog.
+- [docs/ROADMAP.md](docs/ROADMAP.md) — commercial roadmap to the first paying customer.
 - [AGENTS.md](AGENTS.md) — workflow and approval gates for coding agents; [CONTRIBUTING.md](CONTRIBUTING.md) for humans.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — service map, request flows, shared module map.
 - [docs/DATABASE.md](docs/DATABASE.md) — schemas, migration policy, RLS, reset/seed.

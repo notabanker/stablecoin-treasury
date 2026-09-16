@@ -1,6 +1,8 @@
 # Technical Backlog
 
 Technology work only; excludes fundraising, sales, legal, licensing, and partner negotiations.
+The commercial roadmap through the first paying customer (business + legal + technical phases,
+gates, and the bank-partner structure decision) lives in [docs/ROADMAP.md](docs/ROADMAP.md).
 Completed programs are recorded in one line each; outcomes and detailed history are in
 [docs/HISTORY.md](docs/HISTORY.md).
 
